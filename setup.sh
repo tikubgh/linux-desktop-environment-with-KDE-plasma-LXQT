@@ -448,7 +448,7 @@ if [ -f /var/www/jiopc/ariang/index.html ]; then
         opt.secret = '';
         opt.httpMethod = 'POST';
         localStorage.setItem(key, JSON.stringify(opt));
-    } catch(e){}\
+    } catch(e){}
 })();
 CAT_A2_CONF
     grep -q "auto-config.js" /var/www/jiopc/ariang/index.html || sed -i 's#</head>#<script src="auto-config.js"></script></head>#' /var/www/jiopc/ariang/index.html
@@ -736,7 +736,7 @@ cat > /var/www/jiopc/index.html << 'CAT_INDEX'
       gap: 8px;
       padding: 6px 14px;
       border-radius: 9999px;
-      background: rgba(16, 185, 129, 0.15);\
+      background: rgba(16, 185, 129, 0.15);
       border: 1px solid rgba(16, 185, 129, 0.3);
       color: #34d399;
       font-size: 13px;
@@ -1156,7 +1156,7 @@ mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
 
 /usr/bin/Xvnc :1 \
-  -geometry 1920x1080 \
+  -geometry 1366x1080 \
   -depth 24 \
   -SecurityTypes None \
   -rfbport 5901 \
