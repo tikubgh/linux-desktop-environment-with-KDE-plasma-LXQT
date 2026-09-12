@@ -1,1767 +1,1039 @@
-rm setup.sh
+rm -f setup.sh
 cat > setup.sh << 'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
+# ==============================================================================
+# LinuxPC Cloud Workstation Setup - KasmVNC 60 FPS & WebSocket Bridge Fix
+# Strict UpCloud Open Firewall Ports (80, 443, 8443, 22, 3389)
+# ==============================================================================
+set -e
 
-echo "===================================================================="
-echo " Starting LinuxPC Cloud Desktop (Butter-Smooth 60FPS Video Fix)     "
-echo "===================================================================="
+SERVER_IP="95.111.195.58"
 
-if [ "$EUID" -ne 0 ]; then
-    echo "[-] Error: Please execute as root."
-    exit 1
+# 1. Maintain or generate strong credentials
+if [ -f /root/.linuxpc_credentials ]; then
+    VNC_PASS=$(grep -i "Password" /root/.linuxpc_credentials | awk '{print $NF}')
 fi
+if [ -z "$VNC_PASS" ]; then
+    VNC_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 14)
+fi
+BASIC_AUTH_B64=$(echo -n "root:${VNC_PASS}" | base64)
 
-# 1. Architecture Detection
-RAW_ARCH=$(uname -m)
-case "$RAW_ARCH" in
-    x86_64|amd64) SYS_ARCH="amd64" ;;
-    aarch64|arm64) SYS_ARCH="arm64" ;;
-    *) echo "[-] Error: Unsupported architecture ($RAW_ARCH)."; exit 1 ;;
-esac
+echo "===================================================================="
+echo "  Starting LinuxPC Cloud Setup (WebSocket & 60 FPS Stream Fix)     "
+echo "===================================================================="
 
-# 2. Suppress Needrestart & APT Prompts
+# 2. Terminate legacy VNC and audio processes
+echo "[+] Cleaning legacy VNC and audio processes..."
+systemctl stop kasmvnc tigervnc websockify audio-streamer dufs aria2 2>/dev/null || true
+pkill -9 -f Xvnc 2>/dev/null || true
+pkill -9 -f kasmvnc 2>/dev/null || true
+pkill -9 -f websockify 2>/dev/null || true
+rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
+
+# 3. Kernel & TCP network buffer tuning for zero-latency 60 FPS streaming
+echo "[+] Optimizing network stack and socket buffers..."
+cat > /etc/sysctl.d/99-linuxpc-latency.conf << 'SYSCTL_EOF'
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_low_latency = 1
+net.ipv4.tcp_notsent_lowat = 16384
+SYSCTL_EOF
+sysctl -p /etc/sysctl.d/99-linuxpc-latency.conf >/dev/null 2>&1 || true
+
+# 4. Install core packages
+echo "[+] Verifying core packages and desktop environment..."
 export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
-export NEEDRESTART_SUSPEND=1
+apt-get update -y
+apt-get install -y --no-install-recommends \
+    kde-plasma-desktop plasma-nm dolphin konsole \
+    xorg dbus-x11 x11-xserver-utils xauth xinit \
+    ssl-cert pulseaudio pulseaudio-utils libpulse-dev \
+    nginx curl wget jq tar gzip ca-certificates openssl net-tools \
+    python3 python3-pip python3-websockets aria2 ffmpeg
 
-mkdir -p /etc/needrestart/conf.d
-echo '$nrconf{restart} = "a";' > /etc/needrestart/conf.d/99-auto.conf 2>/dev/null || true
-if [ -f /etc/needrestart/needrestart.conf ]; then
-    sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf 2>/dev/null || true
-    sed -i "s/\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf 2>/dev/null || true
+# 5. Fix KDE Plasma executable discovery
+echo "[+] Ensuring startplasma-x11 compatibility symlinks..."
+if [ -f /usr/bin/startplasma-x11 ]; then
+    ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde
 fi
 
-# 3. Clean up Locks, Free Sockets & Expand Shared Memory
-killall apt apt-get unattended-upgrade 2>/dev/null || true
-rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* 2>/dev/null || true
-dpkg --configure -a 2>/dev/null || true
-
-# 2GB shared memory for smooth HD video decoding
-mount -o remount,size=2G /dev/shm 2>/dev/null || true
-
-fuser -k 5901/tcp >/dev/null 2>&1 || true
-fuser -k 6080/tcp >/dev/null 2>&1 || true
-fuser -k 6081/tcp >/dev/null 2>&1 || true
-pkill -9 -x Xvnc 2>/dev/null || true
-pkill -9 -f "[w]ebsockify" 2>/dev/null || true
-pkill -9 -f "linuxpc-audio-server" 2>/dev/null || true
-
-# 4. Network & Kernel Shields
-mkdir -p /etc/ssh/sshd_config.d /etc/apt/preferences.d
-cat > /etc/ssh/sshd_config.d/99-linuxpc-keepalive.conf << 'CAT_SSH'
-ClientAliveInterval 30
-ClientAliveCountMax 120
-TCPKeepAlive yes
-CAT_SSH
-systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-
-cat > /etc/apt/preferences.d/no-connman << 'CAT_PIN'
-Package: connman connman-* cmst networkd-dispatcher
-Pin: release *
-Pin-Priority: -1
-CAT_PIN
-systemctl mask connman 2>/dev/null || true
-systemctl mask connman-vpn 2>/dev/null || true
-
-cat > /etc/sysctl.d/99-linuxpc.conf << 'CAT_SYSCTL'
-kernel.unprivileged_userns_clone=1
-net.ipv4.tcp_nodelay=1
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-net.ipv4.tcp_rmem=4096 87380 16777216
-net.ipv4.tcp_wmem=4096 65536 16777216
-vm.swappiness=10
-CAT_SYSCTL
-sysctl --system >/dev/null 2>&1 || true
-
-# 5. SSL Certificates for Ports 443 & 8443
-mkdir -p /etc/ssl/jiopc
-if [ ! -f /etc/ssl/jiopc/jiopc.crt ]; then
-  openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout /etc/ssl/jiopc/jiopc.key \
-    -out /etc/ssl/jiopc/jiopc.crt \
-    -days 3650 \
-    -subj "/C=IN/ST=Cloud/L=Node/O=LinuxPC/CN=linuxpc" 2>/dev/null || true
-  chmod 600 /etc/ssl/jiopc/jiopc.key 2>/dev/null || true
+# 6. Install KasmVNC 1.5.0
+echo "[+] Verifying KasmVNC installation..."
+if ! dpkg -l | grep -q kasmvncserver; then
+    KASMVNC_DEB="kasmvncserver_jammy_1.5.0_amd64.deb"
+    KASMVNC_URL="https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/${KASMVNC_DEB}"
+    echo "[+] Downloading ${KASMVNC_DEB}..."
+    curl -fSL -o "/tmp/${KASMVNC_DEB}" "${KASMVNC_URL}"
+    apt-get install -y "/tmp/${KASMVNC_DEB}" || apt-get install -f -y
+    rm -f "/tmp/${KASMVNC_DEB}"
 fi
 
-# 6. Repositories (Enable Universe + Multiverse for Complete Icon Packages)
-add-apt-repository -y universe 2>/dev/null || true
-add-apt-repository -y multiverse 2>/dev/null || true
-add-apt-repository -y ppa:kubuntu-ppa/backports 2>/dev/null || true
+if [ -f /usr/lib/kasmvncserver/select-de.sh ]; then
+    sed -i 's/startkde/startplasma-x11/g' /usr/lib/kasmvncserver/select-de.sh 2>/dev/null || true
+fi
 
-curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg 2>/dev/null || true
-echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" > /etc/apt/sources.list.d/brave-browser-release.list
+if [ -f /usr/share/perl5/KasmVNC/TextUI.pm ]; then
+    sed -i 's/my \$userInput = <STDIN>;/my \$userInput = <STDIN>; \$userInput \/\/= "1";/g' /usr/share/perl5/KasmVNC/TextUI.pm 2>/dev/null || true
+fi
 
-apt-get update -y || true
+# 7. SSL certificates setup
+echo "[+] Generating and securing SSL certificates..."
+make-ssl-cert generate-default-snakeoil --force-overwrite
+usermod -a -G ssl-cert root
+chown root:ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
+chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
 
-# 7. Complete Desktop & Deep Icon Packages Installation
-smart_install() {
-    local pkgs=("$@")
-    echo "[+] Verifying core desktop packages..."
-    if ! apt-get install -y --no-install-recommends "${pkgs[@]}"; then
-        dpkg --configure -a || true
-        apt-get install -fy --no-install-recommends || true
-        for p in "${pkgs[@]}"; do
-            if apt-cache show "$p" &>/dev/null; then
-                apt-get install -y --no-install-recommends "$p" 2>/dev/null || true
-            fi
-        done
-    fi
-}
+mkdir -p /etc/nginx/ssl
+cat > /tmp/openssl_san.cnf << SAN_EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
 
-CORE_PACKAGES=(
-    kde-plasma-desktop plasma-workspace konsole dolphin
-    kwin-x11 breeze-cursor-theme
-    plasma-integration libkf5iconthemes5 libkf5iconthemes-bin
-    oxygen-icon-theme papirus-icon-theme hicolor-icon-theme
-    librsvg2-bin librsvg2-common lxqt-core lxqt pcmanfm-qt qterminal featherpad
-    libqt5svg5 qt5-image-formats-plugins libqt5gui5
-    kio kio-extras xrdp xorgxrdp tigervnc-standalone-server tigervnc-common
-    websockify nginx pulseaudio pulseaudio-utils pavucontrol
-    volumeicon-alsa alsa-utils libasound2-plugins
-    brave-browser dbus-x11 x11-xserver-utils jq libglib2.0-bin
+[req_distinguished_name]
+C = SG
+ST = Singapore
+L = Singapore
+O = LinuxPC
+CN = ${SERVER_IP}
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+IP.1 = ${SERVER_IP}
+IP.2 = 127.0.0.1
+DNS.1 = localhost
+SAN_EOF
+
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout /etc/nginx/ssl/server.key \
+    -out /etc/nginx/ssl/server.crt \
+    -config /tmp/openssl_san.cnf 2>/dev/null || true
+rm -f /tmp/openssl_san.cnf
+
+# 8. Automated Non-interactive VNC Credentials Generation via PTY
+echo "[+] Setting up VNC security credentials..."
+mkdir -p /root/.vnc /etc/kasmvnc
+touch /root/.vnc/.de-was-selected
+
+python3 - << PY_AUTH_EOF
+import os, pty, select, subprocess, time, sys
+
+password = "${VNC_PASS}"
+username = "root"
+
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    ["kasmvncpasswd", "-u", username],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True
 )
+os.close(slave)
 
-smart_install "${CORE_PACKAGES[@]}"
+buf = ""
+start = time.time()
+passwords_sent = 0
 
-echo "[+] Ensuring icon themes are physically unpacked on disk..."
-apt-get install -y --reinstall oxygen-icon-theme papirus-icon-theme breeze-icon-theme 2>/dev/null || true
-
-# 8. Fast Google Chrome Verification
-echo "[+] Ensuring Google Chrome official binary is installed..."
-if [ -f /opt/google/chrome/google-chrome ] || command -v google-chrome >/dev/null 2>&1; then
-    echo "[✓] Google Chrome is already present."
-else
-    if ! apt-get install -y --no-install-recommends google-chrome-stable 2>/dev/null; then
-        curl -fsSL --connect-timeout 10 --max-time 60 https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb 2>/dev/null || true
-        if [ -f /tmp/chrome.deb ] && [ $(stat -c%s /tmp/chrome.deb 2>/dev/null || echo 0) -gt 10000000 ]; then
-            dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -fy --no-install-recommends 2>/dev/null || true
-            rm -f /tmp/chrome.deb
-        fi
-    fi
-fi
-
-if [ -f /opt/google/chrome/google-chrome ]; then
-    ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome-stable
-    ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome
-fi
-
-# 9. Fast Brave Browser Verification
-echo "[+] Ensuring Brave Browser is installed..."
-if command -v brave-browser >/dev/null 2>&1; then
-    echo "[✓] Brave Browser is already present."
-else
-    apt-get install -y --no-install-recommends brave-browser 2>/dev/null || true
-fi
-
-# Universal Butter-Smooth 60FPS Video Launchers (Direct SIMD Skia Rasterizer)
-mkdir -p /usr/local/bin
-cat > /usr/local/bin/google-chrome << 'CAT_CHROME_WRAP'
-#!/bin/bash
-exec /opt/google/chrome/google-chrome \
-  --no-sandbox \
-  --test-type \
-  --user-data-dir=/root/.config/google-chrome \
-  --password-store=basic \
-  --disable-dev-shm-usage \
-  --disable-gpu-vsync \
-  --disable-frame-rate-limit \
-  --disable-gpu-compositing \
-  --num-raster-threads=4 \
-  --disable-background-timer-throttling \
-  --disable-backgrounding-occluded-windows \
-  --disable-renderer-backgrounding \
-  --audio-buffer-size=1024 \
-  --enable-features=VaapiVideoDecoder \
-  --disable-features=UseChromeOSDirectVideoDecoder,Av1Decoder \
-  --autoplay-policy=no-user-gesture-required \
-  "$@"
-CAT_CHROME_WRAP
-chmod +x /usr/local/bin/google-chrome
-
-cat > /usr/local/bin/brave-browser << 'CAT_BRAVE_WRAP'
-#!/bin/bash
-REAL_BRAVE=$(command -v /opt/brave.com/brave/brave-browser || command -v /usr/bin/brave-browser || echo "")
-exec "$REAL_BRAVE" \
-  --no-sandbox \
-  --test-type \
-  --user-data-dir=/root/.config/BraveSoftware/Brave-Browser \
-  --password-store=basic \
-  --disable-dev-shm-usage \
-  --disable-gpu-vsync \
-  --disable-frame-rate-limit \
-  --disable-gpu-compositing \
-  --num-raster-threads=4 \
-  --disable-background-timer-throttling \
-  --disable-backgrounding-occluded-windows \
-  --disable-renderer-backgrounding \
-  --audio-buffer-size=1024 \
-  --enable-features=VaapiVideoDecoder \
-  --disable-features=UseChromeOSDirectVideoDecoder,Av1Decoder \
-  --autoplay-policy=no-user-gesture-required \
-  "$@"
-CAT_BRAVE_WRAP
-chmod +x /usr/local/bin/brave-browser
-
-# 10. Patch Dolphin for Root Execution
-if [ -f /usr/bin/dolphin ]; then
-    sed -i 's/geteuid/getppid/' /usr/bin/dolphin 2>/dev/null || true
-fi
-
-# 11. Enterprise Policies: AdBlock + High-Speed H.264 Video Decoder (h264ify)
-mkdir -p /etc/opt/chrome/policies/managed /etc/brave/policies/managed /etc/chromium/policies/managed /opt/google/chrome/extensions
-
-cat > /etc/opt/chrome/policies/managed/adblock.json << 'CAT_ADBLOCK'
-{
-  "ExtensionInstallForcelist": [
-    "gighmmpiobklfepjocnamgkkbiglidom;https://clients2.google.com/service/update2/crx",
-    "cjpalhdlnbpafiamejdnhcphjbkeiagm;https://clients2.google.com/service/update2/crx",
-    "omkfmpieignfdcllmecbhodocldimmjk;https://clients2.google.com/service/update2/crx"
-  ]
-}
-CAT_ADBLOCK
-chmod 644 /etc/opt/chrome/policies/managed/adblock.json
-cp /etc/opt/chrome/policies/managed/adblock.json /etc/brave/policies/managed/adblock.json 2>/dev/null || true
-cp /etc/opt/chrome/policies/managed/adblock.json /etc/chromium/policies/managed/adblock.json 2>/dev/null || true
-
-cat > /opt/google/chrome/extensions/gighmmpiobklfepjocnamgkkbiglidom.json << 'CAT_EXT'
-{
-  "external_update_url": "https://clients2.google.com/service/update2/crx"
-}
-CAT_EXT
-chmod 644 /opt/google/chrome/extensions/gighmmpiobklfepjocnamgkkbiglidom.json
-
-# Native Browser Titlebars
-mkdir -p /root/.config/google-chrome/Default /root/.config/BraveSoftware/Brave-Browser/Default /root/.config/chromium/Default
-cat > /root/.config/google-chrome/Default/Preferences << 'CAT_CHPREF'
-{
-  "browser": {
-    "custom_chrome_frame": false
-  }
-}
-CAT_CHPREF
-cp /root/.config/google-chrome/Default/Preferences /root/.config/BraveSoftware/Brave-Browser/Default/Preferences 2>/dev/null || true
-cp /root/.config/google-chrome/Default/Preferences /root/.config/chromium/Default/Preferences 2>/dev/null || true
-
-# 12. Fast Telegram Desktop Verification
-mkdir -p /opt/Telegram
-if [ -f /opt/Telegram/Telegram ] || command -v telegram-desktop >/dev/null 2>&1; then
-    echo "[✓] Telegram Desktop is already present."
-else
-    curl -fsSL --connect-timeout 10 --max-time 60 "https://telegram.org/dl/desktop/linux" -o /tmp/tsetup.tar.xz 2>/dev/null || true
-    if [ -f /tmp/tsetup.tar.xz ]; then
-        tar -xf /tmp/tsetup.tar.xz -C /opt/ 2>/dev/null || true
-        rm -f /tmp/tsetup.tar.xz
-        chmod +x /opt/Telegram/Telegram 2>/dev/null || true
-    fi
-fi
-ln -sf /opt/Telegram/Telegram /usr/bin/telegram-desktop 2>/dev/null || true
-ln -sf /opt/Telegram/Telegram /usr/local/bin/telegram-desktop 2>/dev/null || true
-
-# 13. Multi-Strategy High-Res 128px PNG Asset Extraction
-echo "[+] Resolving and generating 100% verified local PNG icon assets..."
-mkdir -p /usr/share/icons/jiopc /usr/share/icons/hicolor/128x128/apps /usr/share/pixmaps
-
-if [ -f /opt/google/chrome/product_logo_128.png ]; then
-    cp -f /opt/google/chrome/product_logo_128.png /usr/share/icons/jiopc/chrome.png
-    cp -f /opt/google/chrome/product_logo_128.png /usr/share/icons/hicolor/128x128/apps/google-chrome.png
-fi
-
-if [ -f /opt/brave.com/brave/product_logo_128.png ]; then
-    cp -f /opt/brave.com/brave/product_logo_128.png /usr/share/icons/jiopc/brave.png
-    cp -f /opt/brave.com/brave/product_logo_128.png /usr/share/icons/hicolor/128x128/apps/brave-browser.png
-fi
-
-resolve_png_icon() {
-    local target="$1"
-    shift
-    local search_terms=("$@")
-    mkdir -p "$(dirname "$target")"
-
-    if [ -f "$target" ] && [ $(stat -c%s "$target" 2>/dev/null || echo 0) -gt 500 ]; then
-        return 0
-    fi
-
-    for term in "${search_terms[@]}"; do
-        local found=""
-        found=$(find /usr/share/icons/ /usr/share/pixmaps/ -type f \( -name "${term}.png" -o -name "${term}-*.png" -o -name "*${term}*.png" \) 2>/dev/null | grep -E "128x128|256x256|64x64|48x48|apps|places|status|actions|categories" | head -n 1)
-        if [ -n "$found" ] && [ -s "$found" ] && [ $(stat -c%s "$found" 2>/dev/null || echo 0) -gt 500 ]; then
-            cp -f "$found" "$target"
-            return 0
-        fi
-    done
-
-    for term in "${search_terms[@]}"; do
-        local found_svg=""
-        found_svg=$(find /usr/share/icons/ -type f \( -name "${term}.svg" -o -name "*${term}*.svg" \) 2>/dev/null | head -n 1)
-        if [ -n "$found_svg" ] && [ -s "$found_svg" ] && command -v rsvg-convert &>/dev/null; then
-            if rsvg-convert -w 128 -h 128 "$found_svg" -o "$target" 2>/dev/null; then
-                if [ -s "$target" ] && [ $(stat -c%s "$target" 2>/dev/null || echo 0) -gt 500 ]; then
-                    return 0
-                fi
-            fi
-        fi
-    done
-
-    return 1
-}
-
-resolve_png_icon "/usr/share/icons/jiopc/dolphin.png" "system-file-manager" "org.kde.dolphin" "dolphin" "file-manager"
-resolve_png_icon "/usr/share/icons/jiopc/konsole.png" "utilities-terminal" "org.kde.konsole" "konsole" "terminal"
-resolve_png_icon "/usr/share/icons/jiopc/featherpad.png" "accessories-text-editor" "featherpad" "text-editor" "kate" "kwrite"
-resolve_png_icon "/usr/share/icons/jiopc/volume.png" "audio-volume-high" "volume-high" "audio-volume" "pavucontrol"
-resolve_png_icon "/usr/share/icons/jiopc/aria2files.png" "folder-download" "user-bookmarks" "folder-remote" "folder"
-resolve_png_icon "/usr/share/icons/jiopc/ariang.png" "download" "network-transmit-receive" "go-down"
-resolve_png_icon "/usr/share/icons/jiopc/settings.png" "preferences-system" "systemsettings" "preferences-desktop-theme"
-
-if [ ! -f /usr/share/icons/jiopc/telegram.png ] || [ $(stat -c%s /usr/share/icons/jiopc/telegram.png 2>/dev/null || echo 0) -lt 500 ]; then
-    resolve_png_icon "/usr/share/icons/jiopc/telegram.png" "telegram" "telegram-desktop" || true
-fi
-
-if [ ! -f /usr/share/icons/jiopc/telegram.png ] || [ $(stat -c%s /usr/share/icons/jiopc/telegram.png 2>/dev/null || echo 0) -lt 500 ]; then
-    curl -fsSL --connect-timeout 4 --max-time 10 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/512px-Telegram_logo.svg.png" \
-        -o /usr/share/icons/jiopc/telegram.png 2>/dev/null || true
-fi
-
-python3 -c "
-import zlib, struct, os
-
-def make_telegram_png(path):
-    w, h = 128, 128
-    rows = []
-    cx, cy, r = 64, 64, 58
-    r2 = r * r
-    for y in range(h):
-        row = bytearray([0])
-        for x in range(w):
-            dx, dy = x - cx, y - cy
-            d2 = dx * dx + dy * dy
-            if d2 <= r2:
-                is_plane = False
-                px, py = x - 34, y - 34
-                if 0 <= px <= 60 and 0 <= py <= 60:
-                    if (py <= px * 0.8 + 10) and (py >= px * 0.2 - 5) and (px + py >= 25):
-                        is_plane = True
-                if is_plane:
-                    row.extend([255, 255, 255, 255])
-                else:
-                    alpha = 255
-                    if d2 > (r - 2) * (r - 2):
-                        alpha = int(255 * (r - (d2**0.5)) / 2)
-                        alpha = max(0, min(255, alpha))
-                    row.extend([36, 161, 222, alpha])
-            else:
-                row.extend([0, 0, 0, 0])
-        rows.append(bytes(row))
-    
-    raw = b''.join(rows)
-    comp = zlib.compress(raw, 9)
-    def chunk(tag, d):
-        return struct.pack('>I', len(d)) + tag + d + struct.pack('>I', zlib.crc32(tag + d) & 0xffffffff)
-    
-    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) + chunk(b'IDAT', comp) + chunk(b'IEND', b'')
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'wb') as f: f.write(png)
-
-p = '/usr/share/icons/jiopc/telegram.png'
-if not os.path.exists(p) or os.path.getsize(p) < 500:
-    make_telegram_png(p)
-" 2>/dev/null || true
-
-for f in /usr/share/icons/jiopc/*.png; do
-    if [ -f "$f" ] && [ $(stat -c%s "$f" 2>/dev/null || echo 0) -gt 500 ]; then
-        cp -f "$f" /usr/share/icons/hicolor/128x128/apps/ 2>/dev/null || true
-        cp -f "$f" /usr/share/pixmaps/ 2>/dev/null || true
-    fi
-done
-
-# 14. Configure Active Desktop & Universal System Icon Themes
-echo "[+] Configuring GTK and Qt universal icon themes..."
-mkdir -p /root/.config/gtk-3.0 /etc/gtk-3.0 /root/.config /etc/xdg /root/.config/lxqt
-
-CHOSEN_THEME=""
-for cand in "breeze" "breeze-dark" "Papirus-Dark" "Papirus" "oxygen"; do
-    if [ -d "/usr/share/icons/$cand" ] && [ -f "/usr/share/icons/$cand/index.theme" ]; then
-        c_cnt=$(find "/usr/share/icons/$cand" -type f \( -name "*.png" -o -name "*.svg" \) 2>/dev/null | wc -l)
-        if [ "$c_cnt" -gt 100 ]; then
-            CHOSEN_THEME="$cand"
+while proc.poll() is None and (time.time() - start) < 6:
+    r, _, _ = select.select([master], [], [], 0.3)
+    if r:
+        try:
+            chunk = os.read(master, 1024).decode("utf-8", errors="ignore")
+            buf += chunk
+            if ("password" in chunk.lower() or "verify" in chunk.lower()) and passwords_sent < 2:
+                time.sleep(0.1)
+                os.write(master, (password + "\n").encode())
+                passwords_sent += 1
+            elif "select" in chunk.lower() or "action" in chunk.lower() or "access" in chunk.lower():
+                time.sleep(0.1)
+                os.write(master, b"1\n")
+        except OSError:
             break
-        fi
+
+try:
+    os.close(master)
+except Exception:
+    pass
+
+proc.wait(timeout=3)
+PY_AUTH_EOF
+
+for p in /root/.kasmpasswd /root/.vnc/.kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
+    if [ -f /root/.kasmpasswd ] && [ "$p" != "/root/.kasmpasswd" ]; then
+        cp -f /root/.kasmpasswd "$p" 2>/dev/null || true
     fi
+    [ -f "$p" ] && chmod 600 "$p"
 done
-[ -z "$CHOSEN_THEME" ] && CHOSEN_THEME="oxygen"
-echo "[✓] Active Desktop Icon Theme locked to: $CHOSEN_THEME"
 
-if [ ! -d "/usr/share/icons/breeze" ]; then
-    ln -sf "/usr/share/icons/$CHOSEN_THEME" /usr/share/icons/breeze 2>/dev/null || true
-fi
-if [ ! -d "/usr/share/icons/breeze-dark" ]; then
-    ln -sf "/usr/share/icons/$CHOSEN_THEME" /usr/share/icons/breeze-dark 2>/dev/null || true
-fi
+cat > /root/.linuxpc_credentials << CRED_EOF
+LinuxPC Cloud Workstation Credentials
+======================================
+Username : root
+Password : ${VNC_PASS}
+Generated: $(date)
+CRED_EOF
+chmod 600 /root/.linuxpc_credentials
 
-if [ -f "/usr/share/icons/$CHOSEN_THEME/index.theme" ]; then
-    if grep -q "^Inherits=" "/usr/share/icons/$CHOSEN_THEME/index.theme"; then
-        sed -i 's/^Inherits=.*/Inherits=oxygen,breeze,breeze-dark,Papirus,Papirus-Dark,hicolor/' "/usr/share/icons/$CHOSEN_THEME/index.theme"
-    else
-        echo "Inherits=oxygen,breeze,breeze-dark,Papirus,Papirus-Dark,hicolor" >> "/usr/share/icons/$CHOSEN_THEME/index.theme"
-    fi
-fi
+# Bulletproof xstartup
+cat > /root/.vnc/xstartup << 'XSTARTUP_EOF'
+#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=KDE
+export DESKTOP_SESSION=plasma
+export KDE_FULL_SESSION=true
+export QT_QPA_PLATFORM=xcb
+export DISPLAY=:1
 
-cat > /root/.config/gtk-3.0/settings.ini << CAT_GTK3
-[Settings]
-gtk-icon-theme-name=$CHOSEN_THEME
-gtk-theme-name=Breeze-Dark
-gtk-font-name=Noto Sans 10
-gtk-application-prefer-dark-theme=true
-CAT_GTK3
-cp /root/.config/gtk-3.0/settings.ini /etc/gtk-3.0/settings.ini 2>/dev/null || true
+[ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
 
-cat > /root/.gtkrc-2.0 << CAT_GTK2
-gtk-icon-theme-name="$CHOSEN_THEME"
-gtk-theme-name="Breeze-Dark"
-CAT_GTK2
-
-cat > /root/.config/kdeglobals << CAT_KDE_GLOBALS
-[Icons]
-Theme=$CHOSEN_THEME
-CAT_KDE_GLOBALS
-cp /root/.config/kdeglobals /etc/xdg/kdeglobals 2>/dev/null || true
-
-cat > /root/.config/lxqt/lxqt.conf << CAT_LXQT_CONF
-[General]
-icon_theme=$CHOSEN_THEME
-theme=frost
-CAT_LXQT_CONF
-
-# 15. Fast AriaNg Verification & Auto-Connect Patch
-mkdir -p /var/www/jiopc/ariang /usr/share/ariang
-if [ ! -f /var/www/jiopc/ariang/index.html ]; then
-    curl -fsSL --connect-timeout 10 --max-time 30 https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7-AllInOne.zip -o /tmp/ariang.zip 2>/dev/null || true
-    if [ -f /tmp/ariang.zip ]; then
-        unzip -o -q /tmp/ariang.zip -d /var/www/jiopc/ariang/ 2>/dev/null || true
-        cp -r /var/www/jiopc/ariang/* /usr/share/ariang/ 2>/dev/null || true
-        rm -f /tmp/ariang.zip
-    fi
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
 
-if [ -f /var/www/jiopc/ariang/index.html ]; then
-    cat > /var/www/jiopc/ariang/auto-config.js << 'CAT_A2_CONF'
-(function() {
-    try {
-        var h = location.hostname;
-        var p = location.port || (location.protocol === 'https:' ? '443' : '80');
-        var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-        var key = 'AriaNg.Options';
-        var opt = JSON.parse(localStorage.getItem(key) || '{}');
-        opt.rpcHost = h;
-        opt.rpcPort = p;
-        opt.protocol = proto;
-        opt.rpcInterface = 'jsonrpc';
-        opt.secret = '';
-        opt.httpMethod = 'POST';
-        localStorage.setItem(key, JSON.stringify(opt));
-    } catch(e){}
-})();
-CAT_A2_CONF
-    grep -q "auto-config.js" /var/www/jiopc/ariang/index.html || sed -i 's#</head>#<script src="auto-config.js"></script></head>#' /var/www/jiopc/ariang/index.html
+if [ -x /usr/bin/startplasma-x11 ]; then
+    exec /usr/bin/startplasma-x11
+elif [ -x /usr/bin/startkde ]; then
+    exec /usr/bin/startkde
+elif [ -x /usr/bin/xfce4-session ]; then
+    exec /usr/bin/xfce4-session
+else
+    exec x-window-manager
 fi
+XSTARTUP_EOF
+chmod +x /root/.vnc/xstartup
 
-# 16. Optimized Low-Latency PulseAudio Drivers & Pure Python WebSocket Streamer
-mkdir -p /etc/pulse /etc/alsa/conf.d
+# Configure KasmVNC YAML with strict schema compliance
+cat > /etc/kasmvnc/kasmvnc.yaml << 'YAML_EOF'
+desktop:
+  resolution:
+    width: 1366
+    height: 1080
+network:
+  interface: 127.0.0.1
+  websocket_port: 8444
+  ssl:
+    require_ssl: true
+    pem_certificate: /etc/ssl/certs/ssl-cert-snakeoil.pem
+    pem_key: /etc/ssl/private/ssl-cert-snakeoil.key
+encoding:
+  max_frame_rate: 60
+YAML_EOF
+cp -f /etc/kasmvnc/kasmvnc.yaml /root/.vnc/kasmvnc.yaml 2>/dev/null || true
 
-cat > /etc/pulse/daemon.conf << 'CAT_PULSE_DAEMON'
-default-fragments = 2
-default-fragment-size-msec = 10
-CAT_PULSE_DAEMON
+# 9. PulseAudio System Configuration
+echo "[+] Configuring PulseAudio system daemon..."
+cat > /etc/pulse/system.pa << 'PULSE_EOF'
+load-module module-null-sink sink_name=VirtualSink sink_properties=device.description="LinuxPC_Virtual_Sink"
+set-default-sink VirtualSink
+load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1 port=4713
+load-module module-simple-protocol-tcp rate=44100 format=s16le channels=2 source=VirtualSink.monitor record=true port=6082 listen=127.0.0.1
+load-module module-always-sink
+PULSE_EOF
 
-cat > /etc/pulse/default.pa << 'CAT_PULSE'
-load-module module-native-protocol-tcp auth-anonymous=1
-load-module module-native-protocol-unix auth-anonymous=1
-load-module module-null-sink sink_name=Dummy_Output sink_properties=device.description="LinuxPC_Speaker" rate=44100 channels=2
-load-module module-null-sink sink_name=Virtual_Mic sink_properties=device.description="LinuxPC_Microphone" rate=44100 channels=2
-set-default-sink Dummy_Output
-set-default-source Dummy_Output.monitor
-CAT_PULSE
+cat > /etc/pulse/client.conf << 'PULSE_CLIENT_EOF'
+default-server = 127.0.0.1:4713
+autospawn = no
+PULSE_CLIENT_EOF
 
-cat > /etc/asound.conf << 'CAT_ASOUND'
-pcm.!default {
-    type pulse
-    fallback "sysdefault"
-}
-ctl.!default {
-    type pulse
-    fallback "sysdefault"
-}
-CAT_ASOUND
+cat > /etc/systemd/system/pulseaudio.service << 'PULSE_SVC_EOF'
+[Unit]
+Description=PulseAudio System Sound Daemon (Low Latency)
+After=network.target
 
-# Self-Contained RFC 6455 Audio WebSocket Streamer (Zero External Pip Packages)
-cat > /usr/local/bin/linuxpc-audio-server.py << 'CAT_AUDIO_PY'
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+ExecStartPre=-/usr/bin/pulseaudio -k
+ExecStart=/usr/bin/pulseaudio --system --disallow-exit --disallow-module-loading=0 --exit-idle-time=-1 --realtime=true
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+PULSE_SVC_EOF
+
+# 10. Python Low-Latency Audio WebSocket Streamer
+echo "[+] Setting up Audio Streamer Service..."
+cat > /usr/local/bin/audio-streamer.py << 'PY_AUDIO_EOF'
 #!/usr/bin/env python3
 import asyncio
-import base64
-import hashlib
-import os
-import subprocess
+import websockets
+import logging
 
-GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+logging.basicConfig(level=logging.INFO)
 CLIENTS = set()
 
-async def handle_client(reader, writer):
-    headers = b""
-    while b"\r\n\r\n" not in headers:
-        chunk = await reader.read(1024)
-        if not chunk:
-            return
-        headers += chunk
-
-    key = None
-    for line in headers.decode("latin-1", "ignore").split("\r\n"):
-        if line.lower().startswith("sec-websocket-key:"):
-            key = line.split(":", 1)[1].strip()
-            break
-
-    if not key:
-        writer.close()
-        return
-
-    accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
-    response = (
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
-    )
-    writer.write(response.encode("latin-1"))
-    await writer.drain()
-
-    CLIENTS.add(writer)
-    try:
-        while True:
-            msg = await reader.read(1024)
-            if not msg or (msg and msg[0] == 0x88):
-                break
-    except Exception:
-        pass
-    finally:
-        CLIENTS.discard(writer)
-        try: writer.close()
-        except Exception: pass
-
-def make_ws_frame(payload: bytes) -> bytes:
-    length = len(payload)
-    if length <= 125:
-        header = bytes([0x82, length])
-    elif length <= 65535:
-        header = bytes([0x82, 126, (length >> 8) & 0xFF, length & 0xFF])
-    else:
-        header = bytes([0x82, 127]) + length.to_bytes(8, byteorder="big", signed=False)
-    return header + payload
-
-async def audio_broadcaster():
+async def pulse_reader():
     while True:
         try:
-            res = subprocess.run(["pactl", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ, HOME="/root"))
-            if res.returncode == 0:
-                break
-        except Exception:
-            pass
-        await asyncio.sleep(1)
-
-    cmd = [
-        "parec",
-        "--format=s16le",
-        "--rate=44100",
-        "--channels=2",
-        "--device=Dummy_Output.monitor",
-        "--latency-msec=20",
-        "--raw"
-    ]
-    while True:
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=dict(os.environ, HOME="/root")
-            )
-            chunk_size = 3528
+            reader, writer = await asyncio.open_connection('127.0.0.1', 6082)
+            logging.info("Connected to PulseAudio raw PCM stream on port 6082")
             while True:
-                data = await proc.stdout.read(chunk_size)
+                data = await reader.read(1764)
                 if not data:
                     break
                 if CLIENTS:
-                    frame = make_ws_frame(data)
                     dead = set()
-                    for w in list(CLIENTS):
+                    for ws in CLIENTS:
                         try:
-                            w.write(frame)
+                            await ws.send(data)
                         except Exception:
-                            dead.add(w)
+                            dead.add(ws)
                     CLIENTS.difference_update(dead)
         except Exception:
-            await asyncio.sleep(1)
-        finally:
-            if proc:
-                try: proc.kill()
-                except Exception: pass
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
+
+async def ws_handler(websocket):
+    CLIENTS.add(websocket)
+    try:
+        await websocket.wait_closed()
+    finally:
+        CLIENTS.discard(websocket)
 
 async def main():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 6081)
-    await audio_broadcaster()
+    asyncio.create_task(pulse_reader())
+    server = await websockets.serve(ws_handler, "127.0.0.1", 6081)
+    logging.info("Audio WebSocket server running on 127.0.0.1:6081")
+    await server.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())
-CAT_AUDIO_PY
-chmod +x /usr/local/bin/linuxpc-audio-server.py
+PY_AUDIO_EOF
+chmod +x /usr/local/bin/audio-streamer.py
 
-cat > /etc/systemd/system/linuxpc-audio.service << 'CAT_AUDIO_SVC'
+cat > /etc/systemd/system/audio-streamer.service << 'AUDIO_SVC_EOF'
 [Unit]
-Description=LinuxPC Realtime Web Audio Bridge
-After=network.target vncserver.service
+Description=LinuxPC Low-Latency Audio WebSocket Streamer
+After=pulseaudio.service
+Wants=pulseaudio.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/audio-streamer.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+AUDIO_SVC_EOF
+
+# 11. KasmVNC Startup Launcher
+echo "[+] Configuring KasmVNC 60 FPS foreground service..."
+cat > /usr/local/bin/kasmvnc-launcher << 'LAUNCHER_EOF'
+#!/bin/bash
+/usr/bin/vncserver -kill :1 2>/dev/null || true
+rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
+[ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde
+
+exec /usr/bin/vncserver -fg :1 \
+    -geometry 1366x1080 \
+    -depth 24 \
+    -select-de manual \
+    -FrameRate 60 \
+    -VideoTime 0 \
+    -VideoArea 5 \
+    -RectThreads 4
+LAUNCHER_EOF
+chmod +x /usr/local/bin/kasmvnc-launcher
+
+cat > /etc/systemd/system/kasmvnc.service << 'KASMVNC_SVC_EOF'
+[Unit]
+Description=KasmVNC 60 FPS Remote Desktop Server
+After=network.target pulseaudio.service
+Wants=pulseaudio.service
 
 [Service]
 Type=simple
 User=root
 Environment=HOME=/root
 Environment=USER=root
-ExecStart=/usr/bin/python3 /usr/local/bin/linuxpc-audio-server.py
-Restart=always
-RestartSec=2
+Environment=DISPLAY=:1
+WorkingDirectory=/root
+ExecStartPre=-/bin/rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log
+ExecStart=/usr/local/bin/kasmvnc-launcher
+ExecStop=/usr/bin/vncserver -kill :1
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
-CAT_AUDIO_SVC
+KASMVNC_SVC_EOF
 
-# 17. Disable KDE Wallet & Enable Instant Desktop Execution
-mkdir -p /root/.config/autostart
+# 12. Google Chrome 60 FPS Configuration
+echo "[+] Configuring Google Chrome with 60 FPS optimization..."
+if ! command -v google-chrome-stable &>/dev/null; then
+    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null || true
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update -y && apt-get install -y google-chrome-stable || true
+fi
 
-cat > /etc/xdg/kwalletrc << 'CAT_KWALLET'
-[Wallet]
-Default Wallet=kdewallet
-Enabled=false
-First Use=false
-Prompt on Open=false
+cat > /usr/local/bin/chrome-60fps << 'CHROME_EOF'
+#!/bin/bash
+exec /usr/bin/google-chrome-stable \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --enable-features=VaapiVideoDecoder,CanvasOopRasterization,UseSkiaRenderer \
+    --enable-gpu-rasterization \
+    --enable-zero-copy \
+    --ignore-gpu-blocklist \
+    --use-gl=swiftshader \
+    --enable-accelerated-video-decode \
+    --disable-background-timer-throttling \
+    --disable-backgrounding-occluded-windows \
+    --disable-renderer-backgrounding \
+    --autoplay-policy=no-user-gesture-required \
+    "$@"
+CHROME_EOF
+chmod +x /usr/local/bin/chrome-60fps
 
-[org.freedesktop.secrets]
-apiEnabled=false
-CAT_KWALLET
-cp /etc/xdg/kwalletrc /root/.config/kwalletrc 2>/dev/null || true
-
-cat > /root/.config/autostart/kwalletd5.desktop << 'CAT_KWAUTO'
+mkdir -p /root/Desktop
+cat > /root/Desktop/Google-Chrome.desktop << 'DESK_CHROME_EOF'
 [Desktop Entry]
+Version=1.0
 Type=Application
-Name=KWallet
-Exec=/bin/true
-Hidden=true
-CAT_KWAUTO
+Name=Google Chrome (60 FPS)
+Comment=Butter-smooth 60 FPS video playback
+Exec=/usr/local/bin/chrome-60fps %U
+Icon=google-chrome
+Terminal=false
+Categories=Network;WebBrowser;
+DESK_CHROME_EOF
+chmod +x /root/Desktop/Google-Chrome.desktop
 
-cat > /root/.config/kiorc << 'CAT_KIO'
-[Confirmations]
-ConfirmExecute=false
-CAT_KIO
-
-# 18. KDE Plasma 60FPS Low-Lag Tuning (Zero Animations)
-cat > /root/.config/kwinrc << 'CAT_KWIN'
-[Compositing]
-Enabled=false
-GLCore=false
-WindowsBlockCompositing=true
-
-[Windows]
-DelayFocus=false
-FocusPolicy=ClickToFocus
-
-[KDE]
-AnimationDurationFactor=0
-
-[org.kde.kdecoration2]
-BorderSize=Normal
-BorderSizeAuto=false
-ButtonsOnLeft=M
-ButtonsOnRight=IAX
-CloseOnDoubleClickOnMenu=false
-ThemeName=Breeze
-plugin=org.kde.breeze
-CAT_KWIN
-
-cat > /root/.config/ksmserverrc << 'CAT_KDE_SESS'
-[General]
-loginMode=restorePreviousLogout
-CAT_KDE_SESS
-
-# 19. Taskbar Permanently Anchored at BOTTOM (location=4) & Folder View Desktop
-pkill -9 -f "plasmashell" 2>/dev/null || true
-pkill -9 -f "startplasma" 2>/dev/null || true
-rm -rf /root/.cache/plasma* /root/.cache/kio* /root/.cache/ksycoca5* /root/.cache/icon-cache.kcache
-
-cat > /root/.config/plasma-org.kde.plasma.desktop-appletsrc << 'CAT_PLASMA_DESK'
-[ActionPlugins][0]
-MidButton;NoModifier=org.kde.paste
-RightButton;NoModifier=org.kde.contextmenu
-wheel:Vertical;NoModifier=org.kde.switchdesktop
-
-[Containments][1]
-activityId=
-formfactor=0
-immutability=1
-lastScreen=0
-location=0
-plugin=org.kde.plasma.folder
-wallpaperplugin=org.kde.color
-
-[Containments][1][General]
-url=desktop:/
-
-[Containments][2]
-activityId=
-formfactor=2
-immutability=1
-lastScreen=0
-location=4
-plugin=org.kde.panel
-
-[Containments][2][Applets][3]
-immutability=1
-plugin=org.kde.plasma.kickoff
-
-[Containments][2][Applets][4]
-immutability=1
-plugin=org.kde.plasma.taskmanager
-
-[Containments][2][Applets][5]
-immutability=1
-plugin=org.kde.plasma.systemtray
-
-[Containments][2][Applets][6]
-immutability=1
-plugin=org.kde.plasma.digitalclock
-CAT_PLASMA_DESK
-
-cat > /root/.config/lxqt/panel.conf << 'CAT_LXQT_PANEL'
-[General]
-panels=panel1
-
-[panel1]
-alignment=Bottom
-position=Bottom
-desktop=0
-font=
-hidpi=false
-iconSize=24
-lineCount=1
-panelSize=36
-width=100
-widthPercentage=true
-plugins=mainmenu,taskbar,tray,clock
-CAT_LXQT_PANEL
-
-# 20. Fast Dufs File Manager Verification (/aria2files/)
-if command -v dufs >/dev/null 2>&1; then
-    echo "[✓] Dufs binary is already present."
-else
-    curl -fsSL --connect-timeout 10 --max-time 30 https://github.com/sigoden/dufs/releases/download/v0.43.0/dufs-v0.43.0-x86_64-unknown-linux-musl.tar.gz 2>/dev/null | tar -xz -C /usr/local/bin 2>/dev/null || true
+# 13. Dufs File Manager (Internal 127.0.0.1:8088)
+echo "[+] Configuring Dufs Fast File Manager..."
+if [ ! -f /usr/local/bin/dufs ]; then
+    DUFS_VER="v0.43.0"
+    curl -fsSL "https://github.com/sigoden/dufs/releases/download/${DUFS_VER}/dufs-${DUFS_VER}-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /usr/local/bin dufs 2>/dev/null || true
     chmod +x /usr/local/bin/dufs 2>/dev/null || true
 fi
 
-mkdir -p /root/Downloads /root/Desktop
-
-cat > /etc/systemd/system/dufs.service << 'CAT_DUFS'
+mkdir -p /root/Downloads
+cat > /etc/systemd/system/dufs.service << 'DUFS_SVC_EOF'
 [Unit]
-Description=LinuxPC Dufs File Manager
+Description=Dufs Fast File Manager
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/dufs /root/Downloads -b 127.0.0.1 -p 8088 -A --render-index --render-try-index
+ExecStart=/usr/local/bin/dufs /root/Downloads -b 127.0.0.1 -p 8088 --allow-all --render-spa
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-CAT_DUFS
+DUFS_SVC_EOF
 
-cat > /var/www/aria2files-login.html << 'CAT_LOGIN'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>LinuxPC File Manager Login</title>
-  <style>
-    body { background: #0b1120; color: #fff; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 32px; border-radius: 12px; width: 340px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; }
-    input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; margin: 16px 0; box-sizing: border-box; }
-    button { width: 100%; padding: 12px; background: #0284c7; border: none; color: #fff; font-weight: bold; border-radius: 8px; cursor: pointer; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📁 LinuxPC Files</h2>
-    <p style="color: #94a3b8; font-size: 14px;">Enter password to unlock</p>
-    <input type="password" id="pass" placeholder="Password (default: jiopc1234)" autofocus>
-    <button onclick="login()">Unlock Files</button>
-  </div>
-  <script>
-    function login() {
-      const p = document.getElementById('pass').value;
-      if (p === 'jiopc1234') {
-        document.cookie = "aria2_auth=" + p + "; path=/; max-age=2592000; SameSite=Lax";
-        location.href = '/aria2files/';
-      } else {
-        alert("Invalid Password");
-      }
-    }
-    document.getElementById('pass').addEventListener('keypress', (e) => { if (e.key === 'Enter') login(); });
-  </script>
-</body>
-</html>
-CAT_LOGIN
+# 14. Aria2 RPC (Internal 127.0.0.1:6800)
+mkdir -p /etc/aria2
+cat > /etc/aria2/aria2.conf << 'ARIA_CONF_EOF'
+dir=/root/Downloads
+enable-rpc=true
+rpc-allow-origin-all=true
+rpc-listen-all=false
+rpc-listen-port=6800
+max-connection-per-server=16
+split=16
+min-split-size=1M
+continue=true
+max-overall-download-limit=0
+max-overall-upload-limit=0
+ARIA_CONF_EOF
 
-cat > /var/www/aria2files-upload.js << 'CAT_UPLOAD'
-(function() {
-  const btn = document.createElement('button');
-  btn.innerHTML = '⚡ 16-Thread Remote Download';
-  btn.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:12px 20px;background:#0284c7;color:#fff;border:none;border-radius:30px;font-weight:bold;cursor:pointer;z-index:9999;box-shadow:0 4px 15px rgba(0,0,0,0.4);';
-  document.body.appendChild(btn);
-
-  btn.onclick = () => {
-    const url = prompt("Enter Direct Download Link:");
-    if (!url) return;
-    fetch('/jsonrpc', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 'upload',
-        method: 'aria2.addUri',
-        params: [[url]]
-      })
-    }).then(r => r.json()).then(data => {
-      if (data.result) {
-        alert("Download started in background via 16-Thread Aria2!");
-      } else {
-        alert("Error starting download: " + JSON.stringify(data.error));
-      }
-    }).catch(err => alert("Network Error: " + err.message));
-  };
-})();
-CAT_UPLOAD
-
-# 21. Aria2 16-Thread RPC Engine
-cat > /etc/systemd/system/aria2.service << 'CAT_A2'
+cat > /etc/systemd/system/aria2.service << 'ARIA_SVC_EOF'
 [Unit]
-Description=LinuxPC Aria2 Engine
+Description=Aria2 RPC Download Manager
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/aria2c --enable-rpc --rpc-listen-all=true --rpc-listen-port=6800 --rpc-allow-origin-all=true --dir=/root/Downloads --max-connection-per-server=16 --split=16 --min-split-size=1M --daemon=false
+ExecStart=/usr/bin/aria2c --conf-path=/etc/aria2/aria2.conf
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-CAT_A2
+ARIA_SVC_EOF
 
-# 22. Fast RFB Engine Bundle Verification
-mkdir -p /var/www/jiopc
-if [ -f /var/www/jiopc/rfb.bundle.js ] && [ $(stat -c%s /var/www/jiopc/rfb.bundle.js 2>/dev/null || echo 0) -gt 50000 ]; then
-    echo "[✓] RFB standalone bundle is already present."
-else
-    apt-get install -y git nodejs npm 2>/dev/null || true
-    rm -rf /tmp/novnc_src
-    git clone --depth 1 https://github.com/novnc/noVNC.git /tmp/novnc_src 2>/dev/null || true
-    if [ -d /tmp/novnc_src ]; then
-        cat > /tmp/novnc_src/entry.js << 'CAT_ENTRY'
-import RFB from './core/rfb.js';
-if (typeof window !== 'undefined') { window.RFB = RFB; }
-export default RFB;
-CAT_ENTRY
-        npx -y esbuild /tmp/novnc_src/entry.js --bundle --minify --format=iife --global-name=RFBRaw --outfile=/var/www/jiopc/rfb.bundle.js 2>/dev/null || true
-        echo ';if(typeof window!=="undefined"){window.RFB=(window.RFBRaw&&window.RFBRaw.default)?window.RFBRaw.default:(window.RFBRaw||window.RFB);}' >> /var/www/jiopc/rfb.bundle.js
-    fi
-fi
-
-# 23. Web Portal with Hardware-Accelerated Canvas & Zero-CPU Compression (Butter-Smooth 60FPS)
-cat > /var/www/jiopc/index.html << 'CAT_INDEX'
+# 15. Web Dashboard with Direct Desktop Link
+echo "[+] Deploying Web Portal..."
+mkdir -p /var/www/html
+cat > /var/www/html/index.html << 'HTML_EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <title>LinuxPC Workstation - 60 FPS KasmVNC Edition</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LinuxPC Cloud Desktop</title>
-  <script src="/rfb.bundle.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body, html { width: 100%; height: 100%; overflow: hidden; background: #0b1120; color: #f8fafc; }
-    
-    #portal-view {
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(16, 24, 40, 0.85);
+      --border: rgba(56, 189, 248, 0.25);
+      --neon-blue: #38bdf8;
+      --neon-cyan: #06b6d4;
+      --neon-green: #10b981;
+      --text: #f1f5f9;
+      --text-dim: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at 50% 10%, #1e293b 0%, var(--bg) 80%);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      width: 100%;
-      height: 100%;
-      background: radial-gradient(circle at center, #1e293b 0%, #0b1120 100%);
-      padding: 24px;
-      text-align: center;
+      padding: 2.5rem 1rem;
+    }
+    .container { width: 100%; max-width: 1080px; }
+    .header { text-align: center; margin-bottom: 2rem; }
+    .title {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #fff 30%, var(--neon-blue) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
     .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 14px;
-      border-radius: 9999px;
-      background: rgba(16, 185, 129, 0.15);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      color: #34d399;
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 20px;
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--neon-blue);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      margin-top: 0.5rem;
     }
-    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 10px #10b981; }
-    .hero-title { font-size: 44px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 12px; background: linear-gradient(135deg, #ffffff 0%, #94a3b8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .hero-subtitle { font-size: 16px; color: #94a3b8; max-width: 520px; margin-bottom: 36px; line-height: 1.5; }
-    
-    .actions-card {
-      background: rgba(30, 41, 59, 0.7);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
+    .hero-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
       border-radius: 16px;
-      padding: 28px;
-      max-width: 440px;
-      width: 100%;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
+      padding: 2.5rem 2rem;
+      backdrop-filter: blur(12px);
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      margin-bottom: 2rem;
     }
     .btn-launch {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      width: 100%;
-      padding: 16px;
-      font-size: 17px;
-      font-weight: 700;
+      display: inline-block;
+      padding: 1.25rem 3rem;
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
       color: #fff;
-      background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-      box-shadow: 0 4px 20px rgba(2, 132, 199, 0.4);
-      transition: all 0.2s ease;
-    }
-    .btn-launch:hover { transform: translateY(-2px); box-shadow: 0 6px 25px rgba(2, 132, 199, 0.6); }
-    .btn-secondary {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      width: 100%;
-      padding: 12px;
-      font-size: 14px;
-      font-weight: 600;
-      color: #cbd5e1;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
       text-decoration: none;
+      font-weight: 700;
+      font-size: 1.25rem;
+      border-radius: 12px;
+      box-shadow: 0 0 25px rgba(6, 182, 212, 0.4);
+      transition: all 0.25s ease;
       cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    .btn-secondary:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
-
-    #desktop-view {
-      display: none;
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
-      background: #000;
-      z-index: 100;
-    }
-    #screen-container {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #000;
-    }
-    #screen-container canvas {
-      outline: none;
-      transform: translateZ(0);
-      backface-visibility: hidden;
-      image-rendering: auto;
-      will-change: transform;
-    }
-
-    #floating-dock {
-      position: absolute;
-      top: 12px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(15, 23, 42, 0.88);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.18);
-      border-radius: 30px;
-      padding: 6px 16px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      z-index: 200;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      opacity: 0.45;
-      transition: opacity 0.25s ease;
-    }
-    #floating-dock:hover { opacity: 1; }
-    .dock-btn {
-      background: transparent;
       border: none;
-      color: #94a3b8;
-      font-size: 13px;
+    }
+    .btn-launch:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 35px rgba(6, 182, 212, 0.7);
+    }
+    .audio-card {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-top: 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .audio-status {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      box-shadow: 0 0 10px #ef4444;
+    }
+    .status-dot.active {
+      background: var(--neon-green);
+      box-shadow: 0 0 10px var(--neon-green);
+    }
+    .btn-audio {
+      padding: 0.75rem 1.5rem;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      color: #fff;
       font-weight: 600;
+      border-radius: 8px;
       cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-audio:hover { background: #334155; }
+    .btn-audio.active { background: #059669; border-color: var(--neon-green); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin-top: 1rem;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 1.5rem;
+      backdrop-filter: blur(8px);
+    }
+    .card h3 {
+      font-size: 1.15rem;
+      margin-bottom: 0.75rem;
+      color: var(--neon-blue);
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 6px;
+      gap: 0.5rem;
     }
-    .dock-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
-    .dock-btn.exit:hover { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
-    
-    .dock-btn-sm {
-      background: transparent;
-      border: none;
-      color: #94a3b8;
-      font-size: 11px;
-      font-weight: bold;
-      cursor: pointer;
-      padding: 2px 6px;
-      border-radius: 4px;
+    .card a {
+      color: var(--neon-cyan);
+      text-decoration: none;
+      display: inline-block;
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+      font-weight: 600;
     }
-    .dock-btn-sm:hover { color: #fff; background: rgba(255, 255, 255, 0.2); }
-
-    #status-overlay {
-      display: none;
-      position: absolute;
-      inset: 0;
-      background: rgba(11, 17, 32, 0.85);
-      backdrop-filter: blur(8px);
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 14px;
-      z-index: 150;
+    .card a:hover { text-decoration: underline; }
+    .telemetry {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      margin-top: 0.5rem;
     }
-    .spinner { width: 42px; height: 42px; border: 4px solid rgba(255, 255, 255, 0.1); border-top-color: #0284c7; border-radius: 50%; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    .footer {
+      margin-top: 3rem;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
   </style>
 </head>
 <body>
+  <div class="container">
+    <div class="header">
+      <h1 class="title">LinuxPC Cloud Workstation</h1>
+      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • UpCloud Singapore</div>
+    </div>
 
-  <div id="portal-view">
-    <div class="badge"><div class="pulse-dot"></div> LinuxPC Cloud Node Online</div>
-    <h1 class="hero-title">LinuxPC Cloud Desktop</h1>
-    <p class="hero-subtitle">Unified Kubuntu + KDE + LXQt Desktop with Butter-Smooth 60FPS Video & Lip-Synced Laptop Audio.</p>
-    
-    <div class="actions-card">
-      <button class="btn-launch" onclick="launchLinuxPC()">
+    <div class="hero-card">
+      <h2 style="font-size: 1.5rem; margin-bottom: 0.75rem;">Interactive Desktop Session</h2>
+      <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
+        Zero-lag 60 FPS video playback in Google Chrome, real-time PulseAudio sound, and KDE Plasma 5 suite.
+      </p>
+      
+      <a href="/desktop/?autoconnect=true" target="_blank" class="btn-launch">
         🚀 Launch LinuxPC Desktop
-      </button>
-      <a href="/aria2files/" target="_blank" class="btn-secondary">
-        📁 Open File Manager (/aria2files/)
       </a>
-    </div>
-  </div>
 
-  <div id="desktop-view">
-    <div id="floating-dock">
-      <button id="btn-audio" class="dock-btn" onclick="toggleAudio()">🔊 Audio: On</button>
-      <div style="display:inline-flex;align-items:center;background:rgba(255,255,255,0.08);border-radius:6px;padding:2px 6px;gap:2px;">
-        <button class="dock-btn-sm" onclick="adjustSync(-0.020)" title="Audio sooner (-20ms)">◀</button>
-        <span id="sync-label" style="font-size:12px;color:#cbd5e1;min-width:68px;text-align:center;">Sync: 80ms</span>
-        <button class="dock-btn-sm" onclick="adjustSync(0.020)" title="Audio later (+20ms)">▶</button>
+      <div class="audio-card">
+        <div class="audio-status">
+          <div id="audioDot" class="status-dot"></div>
+          <span id="audioText">Audio Bridge: Idle (Click to Enable)</span>
+          <span id="audioLatency" style="color: var(--neon-green); font-size: 0.8rem; margin-left: 0.5rem;"></span>
+        </div>
+        <button id="toggleAudioBtn" class="btn-audio" onclick="toggleAudio()">🔊 Turn Audio On</button>
       </div>
-      <button class="dock-btn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
-      <button class="dock-btn" onclick="sendCtrlAltDel()">⚡ Ctrl+Alt+Del</button>
-      <button class="dock-btn" onclick="sendClipboard()">📋 Paste Text</button>
-      <button class="dock-btn" onclick="window.open('/aria2files/', '_blank')">📁 Files</button>
-      <button class="dock-btn exit" onclick="exitDesktop()">✕ Exit</button>
     </div>
 
-    <div id="screen-container"></div>
+    <div class="grid">
+      <div class="card">
+        <h3>⚡ Desktop Specs</h3>
+        <div class="telemetry">
+          • Environment: KDE Plasma 5<br>
+          • Architecture: 4 CPU Cores / 8 GB RAM<br>
+          • Resolution: 1366 x 1080 (Dynamic)<br>
+          • Frame Target: 60 FPS (H.264/WebP Engine)
+        </div>
+      </div>
 
-    <div id="status-overlay">
-      <div class="spinner"></div>
-      <div id="status-text" style="font-size: 16px; font-weight: 600;">Connecting to LinuxPC Desktop...</div>
+      <div class="card">
+        <h3>📁 Storage & Files</h3>
+        <div class="telemetry">
+          High-speed file explorer for uploading and downloading media files to VPS storage.
+        </div>
+        <a href="/files/" target="_blank">Open File Explorer →</a>
+      </div>
+
+      <div class="card">
+        <h3>⬇️ Aria2 Downloader</h3>
+        <div class="telemetry">
+          High-throughput multi-connection background download client with Web UI.
+        </div>
+        <a href="/ariang/" target="_blank">Open AriaNg Interface →</a>
+      </div>
+    </div>
+
+    <div class="footer">
+      LinuxPC Cloud Engine • Accessible via Ports 80, 443 & 8443 (Full Cloudflare Support).
     </div>
   </div>
 
   <script>
-    let rfbClient = null;
-    let connectRetries = 0;
-    const MAX_RETRIES = 6;
     let audioCtx = null;
     let audioWs = null;
-    let audioDelay = 0.080; // 80ms calibrated lip-sync delay
     let nextAudioTime = 0;
-
-    function adjustSync(delta) {
-      audioDelay = Math.max(0, Math.min(0.5, audioDelay + delta));
-      const ms = Math.round(audioDelay * 1000);
-      const lbl = document.getElementById('sync-label');
-      if (lbl) lbl.innerText = `Sync: ${ms}ms`;
-      if (audioCtx) nextAudioTime = audioCtx.currentTime + audioDelay;
-    }
-
-    function initAudio() {
-      if (audioWs && (audioWs.readyState === WebSocket.OPEN || audioWs.readyState === WebSocket.CONNECTING)) return;
-      try {
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContext) return;
-        if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 });
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-        
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        audioWs = new WebSocket(`${proto}//${location.host}/audio`);
-        audioWs.binaryType = 'arraybuffer';
-        
-        nextAudioTime = 0;
-
-        audioWs.onopen = () => {
-          const btn = document.getElementById('btn-audio');
-          if (btn) { btn.innerHTML = '🔊 Audio: On'; btn.style.color = '#34d399'; }
-        };
-
-        audioWs.onmessage = (e) => {
-          if (!audioCtx || audioCtx.state !== 'running') return;
-          const raw = e.data;
-          if (raw.byteLength < 4) return;
-          const int16 = new Int16Array(raw);
-          const frames = int16.length / 2;
-          const buf = audioCtx.createBuffer(2, frames, 44100);
-          const left = buf.getChannelData(0);
-          const right = buf.getChannelData(1);
-          for (let i = 0; i < frames; i++) {
-            left[i] = int16[i * 2] / 32768.0;
-            right[i] = int16[i * 2 + 1] / 32768.0;
-          }
-          const src = audioCtx.createBufferSource();
-          src.buffer = buf;
-          src.connect(audioCtx.destination);
-
-          const now = audioCtx.currentTime;
-          const targetStart = now + audioDelay;
-
-          if (nextAudioTime < targetStart) {
-            nextAudioTime = targetStart;
-          }
-          if (nextAudioTime > targetStart + 0.25) {
-            nextAudioTime = targetStart;
-          }
-
-          src.start(nextAudioTime);
-          nextAudioTime += buf.duration;
-        };
-
-        audioWs.onclose = () => {
-          const btn = document.getElementById('btn-audio');
-          if (btn) { btn.innerHTML = '🔇 Audio: Standby'; btn.style.color = '#94a3b8'; }
-        };
-        audioWs.onerror = () => {};
-      } catch (err) {}
-    }
+    let isAudioPlaying = false;
 
     function toggleAudio() {
-      if (!audioCtx) {
-        initAudio();
-      } else if (audioCtx.state === 'running') {
-        audioCtx.suspend().then(() => {
-          const btn = document.getElementById('btn-audio');
-          if (btn) { btn.innerHTML = '🔇 Audio: Muted'; btn.style.color = '#f59e0b'; }
-        });
-      } else {
-        audioCtx.resume().then(() => {
-          initAudio();
-          const btn = document.getElementById('btn-audio');
-          if (btn) { btn.innerHTML = '🔊 Audio: On'; btn.style.color = '#34d399'; }
-        });
-      }
-    }
+      const btn = document.getElementById('toggleAudioBtn');
+      const dot = document.getElementById('audioDot');
+      const txt = document.getElementById('audioText');
+      const lat = document.getElementById('audioLatency');
 
-    function getRFBConstructor() {
-      if (typeof window.RFB === 'function') return window.RFB;
-      if (window.RFB && typeof window.RFB.default === 'function') return window.RFB.default;
-      if (window.RFBRaw && typeof window.RFBRaw.default === 'function') return window.RFBRaw.default;
-      if (window.RFBRaw && typeof window.RFBRaw === 'function') return window.RFBRaw;
-      return null;
-    }
-
-    function showStatus(text, showSpinner = true) {
-      const overlay = document.getElementById('status-overlay');
-      const label = document.getElementById('status-text');
-      const spinner = overlay.querySelector('.spinner');
-      label.innerText = text;
-      spinner.style.display = showSpinner ? 'block' : 'none';
-      overlay.style.display = 'flex';
-    }
-
-    function hideStatus() {
-      document.getElementById('status-overlay').style.display = 'none';
-    }
-
-    function launchLinuxPC() {
-      const RFBCtor = getRFBConstructor();
-      if (!RFBCtor) {
-        alert("Launch Error: RFB Engine failed to initialize. Please refresh the page.");
+      if (isAudioPlaying) {
+        if (audioWs) audioWs.close();
+        if (audioCtx) audioCtx.close();
+        audioCtx = null;
+        isAudioPlaying = false;
+        btn.classList.remove('active');
+        btn.innerText = '🔊 Turn Audio On';
+        dot.classList.remove('active');
+        txt.innerText = 'Audio Bridge: Idle';
+        lat.innerText = '';
         return;
       }
 
       try {
-        setTimeout(initAudio, 500);
-      } catch(e) {}
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+        if (audioCtx.state === 'suspended') audioCtx.resume();
 
-      document.getElementById('portal-view').style.display = 'none';
-      document.getElementById('desktop-view').style.display = 'block';
-      showStatus("Connecting to KDE Plasma session...");
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        audioWs = new WebSocket(`${wsProtocol}//${location.host}/audio`);
+        audioWs.binaryType = 'arraybuffer';
 
-      const container = document.getElementById('screen-container');
-      container.innerHTML = '';
+        audioWs.onopen = () => {
+          isAudioPlaying = true;
+          btn.classList.add('active');
+          btn.innerText = '🔇 Mute Audio';
+          dot.classList.add('active');
+          txt.innerText = 'Audio Bridge: Streaming (Synced)';
+          lat.innerText = '[~20ms PCM]';
+        };
 
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}/websockify`;
+        audioWs.onmessage = (event) => {
+          if (!audioCtx) return;
+          const int16Array = new Int16Array(event.data);
+          const numFrames = int16Array.length / 2;
+          const audioBuffer = audioCtx.createBuffer(2, numFrames, 44100);
+          const left = audioBuffer.getChannelData(0);
+          const right = audioBuffer.getChannelData(1);
 
-      try {
-        rfbClient = new RFBCtor(container, url, {
-          credentials: { password: 'jiopc1234' }
-        });
-
-        rfbClient.scaleViewport = true;
-        rfbClient.resizeSession = true;
-        rfbClient.clipViewport = true;
-        // Zero CPU compression overhead: frames render instantly at native 60FPS
-        rfbClient.qualityLevel = 6;
-        rfbClient.compressionLevel = 0;
-        rfbClient.showDotCursor = true;
-
-        rfbClient.addEventListener('connect', () => {
-          hideStatus();
-          connectRetries = 0;
-          rfbClient.focus();
-        });
-
-        rfbClient.addEventListener('disconnect', (e) => {
-          if (connectRetries < MAX_RETRIES && !e.detail.clean) {
-            connectRetries++;
-            showStatus(`Connecting to KDE Plasma session (Attempt ${connectRetries}/${MAX_RETRIES})...`);
-            setTimeout(() => {
-              if (document.getElementById('desktop-view').style.display === 'block') {
-                launchLinuxPC();
-              }
-            }, 1500);
-          } else {
-            showStatus(e.detail.clean ? "Session ended." : "Connection lost. Click Exit to return.", false);
+          for (let i = 0; i < numFrames; i++) {
+            left[i] = int16Array[i * 2] / 32768.0;
+            right[i] = int16Array[i * 2 + 1] / 32768.0;
           }
-        });
 
-        rfbClient.addEventListener('credentialsrequired', () => {
-          rfbClient.sendCredentials({ password: 'jiopc1234' });
-        });
+          const source = audioCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioCtx.destination);
 
+          const curTime = audioCtx.currentTime;
+          if (nextAudioTime < curTime) {
+            nextAudioTime = curTime + 0.02;
+          }
+          source.start(nextAudioTime);
+          nextAudioTime += audioBuffer.duration;
+        };
+
+        audioWs.onerror = () => {
+          txt.innerText = 'Audio Connection Error (PulseAudio restarting)';
+        };
+
+        audioWs.onclose = () => {
+          if (isAudioPlaying) {
+            txt.innerText = 'Audio Bridge: Disconnected';
+            dot.classList.remove('active');
+          }
+        };
       } catch (err) {
-        alert("Launch Failed: " + err.message);
-        exitDesktop();
-      }
-    }
-
-    function exitDesktop() {
-      connectRetries = MAX_RETRIES;
-      if (rfbClient) {
-        try { rfbClient.disconnect(); } catch (e) {}
-        rfbClient = null;
-      }
-      if (audioWs) {
-        try { audioWs.close(); } catch (e) {}
-        audioWs = null;
-      }
-      document.getElementById('desktop-view').style.display = 'none';
-      document.getElementById('portal-view').style.display = 'flex';
-      hideStatus();
-    }
-
-    function toggleFullscreen() {
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen();
-      } else {
-        document.exitFullscreen();
-      }
-    }
-
-    function sendCtrlAltDel() {
-      if (rfbClient) rfbClient.sendCtrlAltDel();
-    }
-
-    function sendClipboard() {
-      const text = prompt("Paste text to send directly to Cloud Desktop:");
-      if (text && rfbClient) {
-        rfbClient.clipboardPasteFrom(text);
+        alert('Web Audio initialization error: ' + err.message);
       }
     }
   </script>
 </body>
 </html>
-CAT_INDEX
+HTML_EOF
 
-# 24. Create Desktop Shortcuts with Verified Physical Icons
-echo "[+] Binding desktop shortcuts directly to local physical icons..."
-mkdir -p /root/Desktop /usr/share/applications
-
-add_shortcut() {
-    local fn="$1" name="$2" cmd="$3" icon="$4"
-    cat > "/usr/share/applications/$fn" << CAT_SHORTCUT
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=$name
-Exec=$cmd
-Icon=$icon
-Terminal=false
-StartupNotify=true
-Categories=Network;Utility;System;
-CAT_SHORTCUT
-    cp "/usr/share/applications/$fn" /root/Desktop/ 2>/dev/null || true
-    chmod 755 "/root/Desktop/$fn" 2>/dev/null || true
-    gio set "/root/Desktop/$fn" metadata::trusted true 2>/dev/null || true
-}
-
-get_icon_target() {
-    local physical="$1"
-    local themename="$2"
-    if [ -f "$physical" ] && [ $(stat -c%s "$physical" 2>/dev/null || echo 0) -gt 500 ]; then
-        echo "$physical"
-    else
-        echo "$themename"
+# 16. AriaNg Client Setup
+if [ ! -d /var/www/html/ariang ]; then
+    mkdir -p /var/www/html/ariang
+    ARIANG_URL="https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip"
+    curl -fsSL -o /tmp/ariang.zip "${ARIANG_URL}" 2>/dev/null || true
+    if command -v unzip &>/dev/null && [ -f /tmp/ariang.zip ]; then
+        unzip -q -o /tmp/ariang.zip -d /var/www/html/ariang 2>/dev/null || true
+        rm -f /tmp/ariang.zip
     fi
-}
-
-CHROME_ICON=$(get_icon_target "/usr/share/icons/jiopc/chrome.png" "google-chrome")
-BRAVE_ICON=$(get_icon_target "/usr/share/icons/jiopc/brave.png" "brave-browser")
-TELEGRAM_ICON=$(get_icon_target "/usr/share/icons/jiopc/telegram.png" "telegram")
-DOLPHIN_ICON=$(get_icon_target "/usr/share/icons/jiopc/dolphin.png" "system-file-manager")
-KONSOLE_ICON=$(get_icon_target "/usr/share/icons/jiopc/konsole.png" "utilities-terminal")
-FEATHER_ICON=$(get_icon_target "/usr/share/icons/jiopc/featherpad.png" "accessories-text-editor")
-VOLUME_ICON=$(get_icon_target "/usr/share/icons/jiopc/volume.png" "audio-volume-high")
-ARIANG_ICON=$(get_icon_target "/usr/share/icons/jiopc/ariang.png" "download")
-FILES_ICON=$(get_icon_target "/usr/share/icons/jiopc/aria2files.png" "folder-download")
-SETTINGS_ICON=$(get_icon_target "/usr/share/icons/jiopc/settings.png" "preferences-system")
-
-add_shortcut "google-chrome.desktop" "Google Chrome" "/usr/local/bin/google-chrome %U" "$CHROME_ICON"
-add_shortcut "brave-browser.desktop" "Brave Browser" "/usr/local/bin/brave-browser %U" "$BRAVE_ICON"
-add_shortcut "telegram.desktop" "Telegram Desktop" "/usr/bin/telegram-desktop -- %u" "$TELEGRAM_ICON"
-add_shortcut "ariang.desktop" "Aria2 Download Manager" "/usr/local/bin/google-chrome --app=http://127.0.0.1/ariang/" "$ARIANG_ICON"
-add_shortcut "aria2-files.desktop" "Aria2 Files (Dufs)" "/usr/local/bin/google-chrome --app=http://127.0.0.1/aria2files/" "$FILES_ICON"
-add_shortcut "file-manager.desktop" "Dolphin File Manager" "/usr/bin/dolphin /root/Downloads" "$DOLPHIN_ICON"
-add_shortcut "pcmanfm-qt.desktop" "PCManFM-Qt Files" "/usr/bin/pcmanfm-qt /root/Downloads" "$DOLPHIN_ICON"
-add_shortcut "terminal.desktop" "Konsole Terminal" "/usr/bin/konsole" "$KONSOLE_ICON"
-add_shortcut "qterminal.desktop" "QTerminal" "/usr/bin/qterminal" "$KONSOLE_ICON"
-add_shortcut "featherpad.desktop" "FeatherPad Editor" "/usr/bin/featherpad" "$FEATHER_ICON"
-add_shortcut "pavucontrol.desktop" "Volume & Sound" "/usr/bin/pavucontrol" "$VOLUME_ICON"
-add_shortcut "systemsettings.desktop" "System Settings" "/usr/bin/systemsettings" "$SETTINGS_ICON"
-
-# 25. Rebuild All Icon Caches Across Themes
-for d in /usr/share/icons/*; do
-    if [ -d "$d" ]; then
-        gtk-update-icon-cache -f -q "$d" 2>/dev/null || true
-    fi
-done
-
-# 26. Direct Xvnc Server Scripts (Instant 1ms Flush - 1366x1080)
-mkdir -p /root/.vnc /etc/tigervnc
-chmod 700 /root/.vnc
-
-echo "jiopc1234" | vncpasswd -f > /root/.vnc/passwd 2>/dev/null || true
-chmod 600 /root/.vnc/passwd 2>/dev/null || true
-
-cat > /root/.vnc/xstartup << 'CAT_XSTART'
-#!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export DISPLAY=:1
-export XDG_CURRENT_DESKTOP="KDE"
-export XDG_SESSION_DESKTOP="KDE"
-export DESKTOP_SESSION="plasma"
-export KDE_FULL_SESSION=true
-export KDE_SESSION_VERSION=5
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-
-export XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
-export XDG_CONFIG_DIRS=/etc/xdg
-export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins
-export QT_QPA_PLATFORMTHEME=kde
-export QT_QUICK_BACKEND=software
-export LIBGL_ALWAYS_SOFTWARE=1
-export KWIN_COMPOSE=N
-
-rm -f /root/.config/google-chrome/Singleton* /root/.config/BraveSoftware/Brave-Browser/Singleton* /root/.config/chromium/Singleton* 2>/dev/null || true
-
-if command -v dbus-launch >/dev/null 2>&1; then
-  eval "$(dbus-launch --sh-syntax --exit-with-session)"
 fi
 
-kbuildsycoca5 --noincremental 2>/dev/null || true
-
-pulseaudio --start --exit-idle-time=-1 2>/dev/null || true
-pactl set-default-sink Dummy_Output 2>/dev/null || true
-pactl set-sink-volume Dummy_Output 65536 2>/dev/null || true
-pactl set-sink-mute Dummy_Output 0 2>/dev/null || true
-
-volumeicon &
-
-if command -v startplasma-x11 >/dev/null 2>&1; then
-  exec startplasma-x11
-elif command -v startlxqt >/dev/null 2>&1; then
-  exec startlxqt
-else
-  kwin_x11 &
-  exec plasma-desktop
-fi
-CAT_XSTART
-chmod +x /root/.vnc/xstartup
-
-cat > /usr/local/bin/linuxpc-vnc.sh << 'CAT_VNCSTART'
-#!/bin/bash
-export USER=root
-export HOME=/root
-export DISPLAY=:1
-export LANG=en_US.UTF-8
-
-fuser -k 5901/tcp >/dev/null 2>&1 || true
-pkill -9 -x Xvnc 2>/dev/null || true
-rm -rf /tmp/.X1-lock /tmp/.X11-unix/X1
-mkdir -p /tmp/.X11-unix
-chmod 1777 /tmp/.X11-unix
-
-XVNC_OPTS="-geometry 1366x1080 -depth 24 -SecurityTypes None -rfbport 5901 -localhost -pn -ac"
-
-# Safely enable instant 1ms update flushes if supported by Xvnc
-if /usr/bin/Xvnc -help 2>&1 | grep -qi "deferUpdate"; then
-  XVNC_OPTS="$XVNC_OPTS -deferUpdate 1"
-fi
-
-/usr/bin/Xvnc :1 $XVNC_OPTS &
-XVNC_PID=$!
-
-for i in $(seq 1 60); do
-  if [ -S /tmp/.X11-unix/X1 ] || [ -e /tmp/.X11-unix/X1 ]; then
-    break
-  fi
-  sleep 0.1
-done
-
-if [ -x /root/.vnc/xstartup ]; then
-  /root/.vnc/xstartup &
-fi
-
-wait $XVNC_PID
-CAT_VNCSTART
-chmod +x /usr/local/bin/linuxpc-vnc.sh
-
-cat > /etc/systemd/system/vncserver.service << 'CAT_VNC'
-[Unit]
-Description=LinuxPC Direct Xvnc Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Environment=USER=root
-Environment=HOME=/root
-ExecStart=/usr/local/bin/linuxpc-vnc.sh
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-CAT_VNC
-
-# 27. Clean Websockify Service
-cat > /etc/systemd/system/websockify.service << 'CAT_WS'
-[Unit]
-Description=LinuxPC Websockify Bridge
-After=network.target vncserver.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/bin/python3 -m websockify 6080 127.0.0.1:5901
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-CAT_WS
-
-# 28. XRDP Configuration (Port 3389)
-adduser xrdp ssl-cert 2>/dev/null || true
-mkdir -p /etc/polkit-1/localauthority/50-local.d
-cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla << 'CAT_PKLA'
-[Allow Colord all Users]
-Identity=unix-user:*
-Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.modify-device
-ResultAny=no
-ResultInactive=no
-ResultActive=yes
-
-[Allow PackageKit all Users]
-Identity=unix-user:*
-Action=org.freedesktop.packagekit.system-sources-refresh
-ResultAny=yes
-ResultInactive=yes
-ResultActive=yes
-CAT_PKLA
-
-cat > /etc/xrdp/startwm.sh << 'CAT_WM'
-#!/bin/sh
-if test -r /etc/profile; then . /etc/profile; fi
-if test -r ~/.profile; then . ~/.profile; fi
-export XDG_CURRENT_DESKTOP="KDE"
-export XDG_SESSION_DESKTOP="KDE"
-export QT_QUICK_BACKEND=software
-export LIBGL_ALWAYS_SOFTWARE=1
-export KWIN_COMPOSE=N
-
-pulseaudio --start 2>/dev/null || true
-volumeicon &
-exec dbus-run-session startplasma-x11
-CAT_WM
-chmod +x /etc/xrdp/startwm.sh
-
-# 29. Nginx Reverse Proxy with Optimized High-Throughput Buffers
-cat > /etc/nginx/sites-available/default << 'CAT_NGINX'
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    '' close;
-}
-
+# 17. Configure Nginx Master Reverse Proxy with Full WebSocket Route Coverage
+echo "[+] Configuring Nginx reverse proxy with complete WebSocket support..."
+cat > /etc/nginx/sites-available/default << NGINX_EOF
+# HTTP Listener
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    listen 8880 default_server;
-    listen [::]:8880 default_server;
+    server_name _;
 
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    listen 8443 ssl default_server;
-    listen [::]:8443 ssl default_server;
+    root /var/www/html;
+    index index.html;
+    client_max_body_size 10240M;
 
-    ssl_certificate /etc/ssl/jiopc/jiopc.crt;
-    ssl_certificate_key /etc/ssl/jiopc/jiopc.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
 
-    client_max_body_size 0;
-
-    location / {
-        root /var/www/jiopc;
-        index index.html;
-        try_files $uri $uri/ =404;
+    location = / {
+        try_files /index.html =404;
     }
 
-    location /ariang/ {
-        alias /var/www/jiopc/ariang/;
-        index index.html;
-    }
-
-    location /websockify {
-        proxy_pass http://127.0.0.1:6080/;
+    # KasmVNC Desktop Direct Proxy
+    location /desktop/ {
+        proxy_pass https://127.0.0.1:8444/;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_buffering off;
-        proxy_request_buffering off;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host 127.0.0.1:8444;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
-        proxy_buffer_size 128k;
-        proxy_buffers 4 256k;
-        tcp_nodelay on;
+        proxy_buffering off;
+        proxy_redirect / /desktop/;
     }
 
+    # Global WebSocket & Asset Handler for KasmVNC
+    location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
+        proxy_pass https://127.0.0.1:8444;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host 127.0.0.1:8444;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    # PulseAudio WebSocket Bridge
     location /audio {
         proxy_pass http://127.0.0.1:6081/;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_buffering off;
-        proxy_request_buffering off;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
-        tcp_nodelay on;
+        proxy_buffering off;
     }
 
-    location = /aria2files-login.html {
-        root /var/www;
-    }
-    location = /aria2files-upload.js {
-        root /var/www;
-    }
-
-    location /aria2files/ {
-        if ($cookie_aria2_auth != "jiopc1234") {
-            return 302 /aria2files-login.html;
-        }
+    location /files/ {
         proxy_pass http://127.0.0.1:8088/;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        sub_filter '</body>' '<script src="/aria2files-upload.js"></script></body>';
-        sub_filter_once on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 
     location /jsonrpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_buffering off;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
+        proxy_set_header Host \$host;
+    }
+
+    location /ariang/ {
+        alias /var/www/html/ariang/;
+        try_files \$uri \$uri/ /ariang/index.html;
     }
 }
-CAT_NGINX
 
-# 30. UFW Firewall Sync
-if command -v ufw &>/dev/null; then
-    ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
-    ufw allow 80/tcp comment 'HTTP' 2>/dev/null || true
-    ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || true
-    ufw allow 3389/tcp comment 'RDP' 2>/dev/null || true
-    ufw allow 8443/tcp comment 'HTTPS Alt' 2>/dev/null || true
-    ufw allow 8880/tcp comment 'HTTP Alt' 2>/dev/null || true
-fi
+# HTTPS Listener (Ports 443 & 8443)
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    server_name _;
 
-# 31. Reload and Restart Services
-systemctl daemon-reload || true
+    ssl_certificate /etc/nginx/ssl/server.crt;
+    ssl_certificate_key /etc/nginx/ssl/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
 
-for s in aria2 dufs xrdp nginx vncserver websockify linuxpc-audio; do
-    systemctl enable "$s" >/dev/null 2>&1 || true
-    systemctl restart "$s" >/dev/null 2>&1 || true
-done
+    root /var/www/html;
+    index index.html;
+    client_max_body_size 10240M;
 
-echo "[+] Waiting for TigerVNC (:5901) & Websockify (:6080) sockets..."
-for i in $(seq 1 12); do
-    if nc -z 127.0.0.1 5901 2>/dev/null && nc -z 127.0.0.1 6080 2>/dev/null; then
-        echo "[✓] SUCCESS: TigerVNC (:5901) & Websockify (:6080) are LIVE!"
-        break
-    fi
-    sleep 1
-done
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
 
-HTTP_CODE=$(curl -s -m 1 -o /dev/null -w "%{http_code}" -H "Upgrade: websocket" -H "Connection: Upgrade" -H "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" -H "Sec-WebSocket-Version: 13" http://127.0.0.1/websockify 2>/dev/null || echo "101")
-echo "[✓] SUCCESS: WebSocket bridge verified (HTTP $HTTP_CODE)!"
+    location = / {
+        try_files /index.html =404;
+    }
 
-# ------------------------------------------------------------------------------
-# 32. AUTOMATED IN-DEPTH SYSTEM DIAGNOSTICS & VERIFICATION
-# ------------------------------------------------------------------------------
-echo ""
+    # KasmVNC Desktop Direct Proxy
+    location /desktop/ {
+        proxy_pass https://127.0.0.1:8444/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host 127.0.0.1:8444;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+        proxy_redirect / /desktop/;
+    }
+
+    # Global WebSocket & Asset Handler for KasmVNC
+    location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
+        proxy_pass https://127.0.0.1:8444;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host 127.0.0.1:8444;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    # PulseAudio WebSocket Bridge
+    location /audio {
+        proxy_pass http://127.0.0.1:6081/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    location /files/ {
+        proxy_pass http://127.0.0.1:8088/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+
+    location /jsonrpc {
+        proxy_pass http://127.0.0.1:6800/jsonrpc;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+    location /ariang/ {
+        alias /var/www/html/ariang/;
+        try_files \$uri \$uri/ /ariang/index.html;
+    }
+}
+NGINX_EOF
+
+# 18. Reload and Start All Services
+echo "[+] Starting and enabling all system services..."
+systemctl daemon-reload
+
+systemctl restart pulseaudio
+sleep 1
+systemctl restart audio-streamer
+sleep 1
+systemctl restart dufs 2>/dev/null || true
+systemctl restart aria2 2>/dev/null || true
+systemctl restart kasmvnc
+sleep 3
+systemctl restart nginx
+
+systemctl enable pulseaudio audio-streamer kasmvnc nginx dufs aria2 2>/dev/null || true
+
+# 19. Port Health Verification
 echo "===================================================================="
-echo " 🔍 Running Automated System Deep Diagnostics...                    "
+echo "                   System Health Verification                       "
 echo "===================================================================="
+sleep 2
 
-if pactl info >/dev/null 2>&1; then
-    echo " [✓] PulseAudio Sound Daemon: Active"
-else
-    echo " [!] PulseAudio Sound Daemon: Starting..."
-    pulseaudio --start --exit-idle-time=-1 2>/dev/null || true
-fi
-
-if systemctl is-active --quiet linuxpc-audio; then
-    echo " [✓] Realtime Web Audio Streamer: Active (Port 6081 -> /audio)"
-fi
-
-if [ -f /usr/lib/x86_64-linux-gnu/qt5/plugins/imageformats/libqsvg.so ]; then
-    echo " [✓] Qt5 SVG ImageFormat Plugin: Found and functional"
-else
-    echo " [!] Qt5 SVG ImageFormat Plugin: Missing! Installing libqt5svg5..."
-    apt-get install -y libqt5svg5 >/dev/null 2>&1 || true
-fi
-
-if [ -f /usr/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/KDEPlasmaPlatformTheme.so ]; then
-    echo " [✓] KDE Plasma Platform Integration Theme: Active"
-else
-    echo " [!] KDE Plasma Platform Theme: Missing! Installing plasma-integration..."
-    apt-get install -y plasma-integration >/dev/null 2>&1 || true
-fi
-
-for theme in breeze breeze-dark Papirus Papirus-Dark oxygen hicolor; do
-    if [ -d "/usr/share/icons/$theme" ]; then
-        COUNT=$(find "/usr/share/icons/$theme" -type f \( -name "*.png" -o -name "*.svg" \) 2>/dev/null | wc -l)
-        echo " [✓] Icon Theme '$theme': $COUNT icons available"
+check_port() {
+    local port=$1
+    local name=$2
+    if netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+        echo -e "  [\033[0;32mOK\033[0m] Port ${port} (${name}) is active"
     else
-        echo " [!] Icon Theme '$theme': Not installed"
+        echo -e "  [\033[0;31mFAIL\033[0m] Port ${port} (${name}) is NOT listening"
     fi
-done
+}
 
-echo " --- Testing KDE Icon Resolution via kiconfinder5 ---"
-for ic in google-chrome brave-browser system-file-manager utilities-terminal accessories-text-editor folder; do
-    RESOLVED=$(kiconfinder5 "$ic" 2>/dev/null || true)
-    if [ -n "$RESOLVED" ]; then
-        echo "   [✓] '$ic' resolved to -> $RESOLVED"
-    else
-        echo "   [✓] '$ic' resolved via physical fallback: /usr/share/icons/jiopc/"
-    fi
-done
+check_port 80 "Nginx HTTP"
+check_port 443 "Nginx HTTPS"
+check_port 8443 "Nginx Alt HTTPS"
+check_port 8444 "KasmVNC Core"
+check_port 6081 "Audio WebSocket"
+check_port 6082 "PulseAudio Monitor"
+check_port 8088 "Dufs Files"
+check_port 6800 "Aria2 RPC"
 
-echo " --- Checking Local Physical 128px PNG Assets (/usr/share/icons/jiopc/) ---"
-for icon_file in chrome brave telegram dolphin konsole featherpad volume aria2files ariang settings; do
-    TARGET_PATH="/usr/share/icons/jiopc/${icon_file}.png"
-    if [ -f "$TARGET_PATH" ] && [ $(stat -c%s "$TARGET_PATH" 2>/dev/null || echo 0) -gt 500 ]; then
-        BYTES=$(stat -c%s "$TARGET_PATH")
-        echo "   [✓] ${icon_file}.png: Verified ($BYTES bytes)"
-    else
-        echo "   [!] ${icon_file}.png: Missing or corrupt"
-    fi
-done
-
-PUBLIC_IP=$(curl -s -4 -m 3 ifconfig.me || curl -s -4 -m 3 icanhazip.com || echo "95.111.195.58")
-
-echo ""
-echo "===================================================================="
-echo "    🎉 LinuxPC Cloud Desktop Fully Fixed & Operational!             "
-echo "===================================================================="
-echo "  UpCloud Open Ports Active: 22, 80, 443, 3389, 8443, 8880"
-echo ""
-echo "  🌐 Web Desktop Portal:     http://${PUBLIC_IP}/"
-echo "  🔒 Web Desktop (HTTPS):    https://${PUBLIC_IP}/"
-echo "  ⚡ Aria2 Download Manager: http://${PUBLIC_IP}/ariang/"
-echo "  📁 Web File Manager:       http://${PUBLIC_IP}/aria2files/"
-echo "  🖥️ Native XRDP (RDP):      ${PUBLIC_IP}:3389"
 echo "--------------------------------------------------------------------"
-echo "  🎬 Video Playback:         Butter-Smooth 60FPS (Direct SIMD Skia & H.264)"
-echo "  🔊 Lip-Synced Audio:       80ms Calibrated Delay with Dock Controls"
-echo "  🖥️ Screen Resolution:      1366x1080 (1ms Damage Flush)"
-echo "  🔑 Web & Desktop Password: jiopc1234"
-echo "  👤 User Account:           root"
-echo "  📌 Taskbar Placement:      Locked at BOTTOM Edge"
-echo "  🛡️ Browser Security Flags: All Warning Banners Suppressed"
-echo "  🎨 Desktop & Menu Icons:   100% Repaired (Multi-Theme Bridge + Local 128px PNGs)"
-echo "  ⚡ Aria2 RPC Engine:       Connected & Ready"
+if netstat -tuln | grep -q ":8444 "; then
+    echo -e "\033[0;32m>>> SUCCESS: KasmVNC 60 FPS Workstation is running cleanly! <<<\033[0m"
+else
+    echo -e "\033[0;31m>>> WARNING: KasmVNC did not bind to 8444. Checking log... <<<\033[0m"
+    journalctl -u kasmvnc -n 15 --no-pager
+fi
+
 echo "===================================================================="
-echo ""
+echo "  UpCloud Workstation Ready! Access Details:"
+echo "===================================================================="
+echo "  Access Portal   : https://${SERVER_IP}/"
+echo "  Direct Desktop  : https://${SERVER_IP}/desktop/?autoconnect=true"
+echo "  VNC Username    : root"
+echo "  VNC Password    : ${VNC_PASS}"
+echo "===================================================================="
+echo "  (Password saved to /root/.linuxpc_credentials)"
+echo "===================================================================="
 EOF
 bash setup.sh
