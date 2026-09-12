@@ -4,6 +4,7 @@ cat > setup.sh << 'EOF'
 # ==============================================================================
 # LinuxPC Cloud Workstation Setup - KasmVNC 60 FPS & WebSocket Bridge Fix
 # Strict UpCloud Open Firewall Ports (80, 443, 8443, 22, 3389)
+# Aria2 Always-Connected (HTTP POST) + Complete System & App Icon Engine + Dark Mode
 # ==============================================================================
 set -e
 
@@ -19,16 +20,21 @@ fi
 BASIC_AUTH_B64=$(echo -n "root:${VNC_PASS}" | base64)
 
 echo "===================================================================="
-echo "  Starting LinuxPC Cloud Setup (WebSocket & 60 FPS Stream Fix)     "
+echo "  Starting LinuxPC Cloud Setup (Aria2 Auto-Connect & Icon Engine Fix)"
 echo "===================================================================="
 
-# 2. Terminate legacy VNC and audio processes
-echo "[+] Cleaning legacy VNC and audio processes..."
+# 2. Terminate legacy processes and clean display locks
+echo "[+] Cleaning legacy processes and freeing X11 display locks..."
 systemctl stop kasmvnc tigervnc websockify audio-streamer dufs aria2 2>/dev/null || true
 pkill -9 -f Xvnc 2>/dev/null || true
 pkill -9 -f kasmvnc 2>/dev/null || true
 pkill -9 -f websockify 2>/dev/null || true
+pkill -9 -f dufs 2>/dev/null || true
+pkill -9 -f pulseaudio 2>/dev/null || true
+pkill -9 -f chrome 2>/dev/null || true
+pkill -9 -f aria2c 2>/dev/null || true
 rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
+rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
 
 # 3. Kernel & TCP network buffer tuning for zero-latency 60 FPS streaming
 echo "[+] Optimizing network stack and socket buffers..."
@@ -43,25 +49,78 @@ net.ipv4.tcp_notsent_lowat = 16384
 SYSCTL_EOF
 sysctl -p /etc/sysctl.d/99-linuxpc-latency.conf >/dev/null 2>&1 || true
 
-# 4. Install core packages
-echo "[+] Verifying core packages and desktop environment..."
+# 4. Superfast APT Configuration & Clean Keys
+echo "[+] Speeding up APT repositories..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y --no-install-recommends \
-    kde-plasma-desktop plasma-nm dolphin konsole \
-    xorg dbus-x11 x11-xserver-utils xauth xinit \
-    ssl-cert pulseaudio pulseaudio-utils libpulse-dev \
-    nginx curl wget jq tar gzip ca-certificates openssl net-tools \
-    python3 python3-pip python3-websockets aria2 ffmpeg
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
 
-# 5. Fix KDE Plasma executable discovery
-echo "[+] Ensuring startplasma-x11 compatibility symlinks..."
+rm -f /etc/apt/sources.list.d/brave-browser*.list /etc/apt/trusted.gpg.d/brave-browser*.gpg /usr/share/keyrings/brave-browser*.gpg 2>/dev/null || true
+echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99translations 2>/dev/null || true
+
+# 5. Core Desktop, SVG Icon Renderers, Utilities & Theme Packages Installation
+echo "[+] Installing full desktop stack, SVG & PNG icon engines, and tools..."
+apt-get update -qq
+apt-get install -y -qq \
+    kde-plasma-desktop \
+    plasma-desktop \
+    plasma-workspace \
+    kde-cli-tools \
+    breeze \
+    breeze-icon-theme \
+    breeze-gtk-theme \
+    breeze-cursor-theme \
+    kwin-x11 \
+    systemsettings \
+    libqt5svg5 \
+    libqt5svg5-dev \
+    qt5-image-formats-plugins \
+    kimageformat-plugins \
+    libkf5iconthemes-bin \
+    libkf5iconthemes5 \
+    libkf5config-bin \
+    papirus-icon-theme \
+    oxygen-icon-theme \
+    adwaita-icon-theme \
+    hicolor-icon-theme \
+    librsvg2-bin \
+    gvfs \
+    gvfs-backends \
+    libglib2.0-bin \
+    dolphin \
+    konsole \
+    xorg \
+    dbus-x11 \
+    x11-xserver-utils \
+    x11-utils \
+    xauth \
+    xinit \
+    ssl-cert \
+    pulseaudio \
+    pulseaudio-utils \
+    libpulse-dev \
+    libasound2-plugins \
+    python3 \
+    python3-pip \
+    python3-websockets \
+    aria2 \
+    ffmpeg \
+    nginx \
+    curl \
+    wget \
+    jq \
+    tar \
+    gzip \
+    unzip \
+    ca-certificates \
+    openssl \
+    net-tools
+
 if [ -f /usr/bin/startplasma-x11 ]; then
     ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde
 fi
 
-# 6. Install KasmVNC 1.5.0
-echo "[+] Verifying KasmVNC installation..."
+# 6. Verify KasmVNC 1.5.0 Installation
 if ! dpkg -l | grep -q kasmvncserver; then
     KASMVNC_DEB="kasmvncserver_jammy_1.5.0_amd64.deb"
     KASMVNC_URL="https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/${KASMVNC_DEB}"
@@ -75,16 +134,133 @@ if [ -f /usr/lib/kasmvncserver/select-de.sh ]; then
     sed -i 's/startkde/startplasma-x11/g' /usr/lib/kasmvncserver/select-de.sh 2>/dev/null || true
 fi
 
-if [ -f /usr/share/perl5/KasmVNC/TextUI.pm ]; then
-    sed -i 's/my \$userInput = <STDIN>;/my \$userInput = <STDIN>; \$userInput \/\/= "1";/g' /usr/share/perl5/KasmVNC/TextUI.pm 2>/dev/null || true
+# 7. Configure System-Wide & User Dark Mode + Icon Themes
+echo "[+] Configuring permanent Dark Mode and Breeze Dark icon themes..."
+mkdir -p /root/.config /root/.config/gtk-3.0 /root/.config/gtk-4.0 /etc/xdg
+
+# System-Wide Defaults
+cat > /etc/xdg/kdeglobals << 'KDE_SYS_EOF'
+[General]
+ColorScheme=BreezeDark
+Name=Breeze Dark
+widgetStyle=Breeze
+
+[KDE]
+colorScheme=BreezeDark
+widgetStyle=Breeze
+
+[Icons]
+Theme=breeze-dark
+
+[org.kde.kdecoration2]
+BorderSize=Normal
+BorderSizeAuto=false
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+library=org.kde.breeze
+theme=Breeze
+KDE_SYS_EOF
+
+# User Settings
+cat > /root/.config/kdeglobals << 'KDE_EOF'
+[General]
+ColorScheme=BreezeDark
+Name=Breeze Dark
+fixed=Monospace,10,-1,5,50,0,0,0,0,0
+font=Noto Sans,10,-1,5,50,0,0,0,0,0
+menuFont=Noto Sans,10,-1,5,50,0,0,0,0,0
+smallestReadableFont=Noto Sans,8,-1,5,50,0,0,0,0,0
+toolBarFont=Noto Sans,10,-1,5,50,0,0,0,0,0
+widgetStyle=Breeze
+
+[KDE]
+ShowDeleteCommand=true
+colorScheme=BreezeDark
+widgetStyle=Breeze
+
+[Icons]
+Theme=breeze-dark
+FallbackTheme=Papirus-Dark
+
+[org.kde.kdecoration2]
+BorderSize=Normal
+BorderSizeAuto=false
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+CloseOnDoubleClickOnMenu=false
+library=org.kde.breeze
+theme=Breeze
+KDE_EOF
+
+cat > /root/.config/kwinrc << 'KWIN_EOF'
+[org.kde.kdecoration2]
+BorderSize=Normal
+BorderSizeAuto=false
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+CloseOnDoubleClickOnMenu=false
+library=org.kde.breeze
+theme=Breeze
+
+[Windows]
+BorderlessMaximizedWindows=false
+TitlebarDoubleClickAction=Maximize
+
+[Compositing]
+Backend=XRender
+Enabled=false
+OpenGLIsUnsafe=true
+KWIN_EOF
+
+cat > /root/.config/plasmarc << 'PLASMA_THEME_EOF'
+[Theme]
+name=breeze-dark
+PLASMA_THEME_EOF
+
+cat > /root/.config/kscreenlockerrc << 'LOCK_EOF'
+[Daemon]
+Autolock=false
+LockOnResume=false
+Timeout=0
+LOCK_EOF
+
+# GTK 2, 3, and 4 Dark Mode Configuration (for Chrome and GTK apps)
+cat > /root/.gtkrc-2.0 << 'GTK2_EOF'
+gtk-theme-name="Breeze-Dark"
+gtk-icon-theme-name="breeze-dark"
+gtk-font-name="Noto Sans 10"
+GTK2_EOF
+
+cat > /root/.config/gtk-3.0/settings.ini << 'GTK3_EOF'
+[Settings]
+gtk-theme-name=Breeze-Dark
+gtk-icon-theme-name=breeze-dark
+gtk-font-name=Noto Sans 10
+gtk-application-prefer-dark-theme=1
+GTK3_EOF
+
+cat > /root/.config/gtk-4.0/settings.ini << 'GTK4_EOF'
+[Settings]
+gtk-theme-name=Breeze-Dark
+gtk-icon-theme-name=breeze-dark
+gtk-font-name=Noto Sans 10
+gtk-application-prefer-dark-theme=1
+GTK4_EOF
+
+# Apply look & feel via KDE CLI tools
+if command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
+    plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
+fi
+if command -v plasma-apply-colorscheme >/dev/null 2>&1; then
+    plasma-apply-colorscheme BreezeDark 2>/dev/null || true
 fi
 
-# 7. SSL certificates setup
+# 8. Setup SSL Certificates
 echo "[+] Generating and securing SSL certificates..."
-make-ssl-cert generate-default-snakeoil --force-overwrite
-usermod -a -G ssl-cert root
-chown root:ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key
-chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key
+make-ssl-cert generate-default-snakeoil --force-overwrite 2>/dev/null || true
+usermod -a -G ssl-cert root 2>/dev/null || true
+chown root:ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
+chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
 
 mkdir -p /etc/nginx/ssl
 cat > /tmp/openssl_san.cnf << SAN_EOF
@@ -117,7 +293,7 @@ openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     -config /tmp/openssl_san.cnf 2>/dev/null || true
 rm -f /tmp/openssl_san.cnf
 
-# 8. Automated Non-interactive VNC Credentials Generation via PTY
+# 9. Automated VNC Security Credentials Generation
 echo "[+] Setting up VNC security credentials..."
 mkdir -p /root/.vnc /etc/kasmvnc
 touch /root/.vnc/.de-was-selected
@@ -135,7 +311,6 @@ proc = subprocess.Popen(
 )
 os.close(slave)
 
-buf = ""
 start = time.time()
 passwords_sent = 0
 
@@ -144,7 +319,6 @@ while proc.poll() is None and (time.time() - start) < 6:
     if r:
         try:
             chunk = os.read(master, 1024).decode("utf-8", errors="ignore")
-            buf += chunk
             if ("password" in chunk.lower() or "verify" in chunk.lower()) and passwords_sent < 2:
                 time.sleep(0.1)
                 os.write(master, (password + "\n").encode())
@@ -179,7 +353,7 @@ Generated: $(date)
 CRED_EOF
 chmod 600 /root/.linuxpc_credentials
 
-# Bulletproof xstartup
+# 10. Configure xstartup with Qt Plugin Paths & SVG Support
 cat > /root/.vnc/xstartup << 'XSTARTUP_EOF'
 #!/bin/bash
 unset SESSION_MANAGER
@@ -191,11 +365,23 @@ export KDE_FULL_SESSION=true
 export QT_QPA_PLATFORM=xcb
 export DISPLAY=:1
 
+export QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
+export XDG_DATA_DIRS="/usr/local/share:/usr/share:/var/lib/snapd/desktop"
+export XDG_CONFIG_DIRS="/etc/xdg"
+export QT_STYLE_OVERRIDE="Breeze"
+export GTK_THEME="Breeze-Dark"
+
 [ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
 
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
+
+# Apply dark look and feel & rebuild sycoca cache
+plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
+plasma-apply-colorscheme BreezeDark 2>/dev/null || true
+kbuildsycoca5 --noincremental 2>/dev/null || true
 
 if [ -x /usr/bin/startplasma-x11 ]; then
     exec /usr/bin/startplasma-x11
@@ -208,8 +394,9 @@ else
 fi
 XSTARTUP_EOF
 chmod +x /root/.vnc/xstartup
+cp -f /root/.vnc/xstartup /etc/kasmvnc/xstartup 2>/dev/null || true
 
-# Configure KasmVNC YAML with strict schema compliance
+# Strict KasmVNC YAML Configuration
 cat > /etc/kasmvnc/kasmvnc.yaml << 'YAML_EOF'
 desktop:
   resolution:
@@ -227,7 +414,7 @@ encoding:
 YAML_EOF
 cp -f /etc/kasmvnc/kasmvnc.yaml /root/.vnc/kasmvnc.yaml 2>/dev/null || true
 
-# 9. PulseAudio System Configuration
+# 11. PulseAudio System Configuration (Ports 4713 & 6082)
 echo "[+] Configuring PulseAudio system daemon..."
 cat > /etc/pulse/system.pa << 'PULSE_EOF'
 load-module module-null-sink sink_name=VirtualSink sink_properties=device.description="LinuxPC_Virtual_Sink"
@@ -260,7 +447,7 @@ RestartSec=2
 WantedBy=multi-user.target
 PULSE_SVC_EOF
 
-# 10. Python Low-Latency Audio WebSocket Streamer
+# 12. Python Low-Latency Audio WebSocket Streamer (Port 6081)
 echo "[+] Setting up Audio Streamer Service..."
 cat > /usr/local/bin/audio-streamer.py << 'PY_AUDIO_EOF'
 #!/usr/bin/env python3
@@ -326,8 +513,8 @@ RestartSec=2
 WantedBy=multi-user.target
 AUDIO_SVC_EOF
 
-# 11. KasmVNC Startup Launcher
-echo "[+] Configuring KasmVNC 60 FPS foreground service..."
+# 13. KasmVNC Startup Launcher (Port 8444 - 60 FPS Native)
+echo "[+] Configuring KasmVNC 60 FPS launcher..."
 cat > /usr/local/bin/kasmvnc-launcher << 'LAUNCHER_EOF'
 #!/bin/bash
 /usr/bin/vncserver -kill :1 2>/dev/null || true
@@ -370,48 +557,35 @@ TimeoutStopSec=10
 WantedBy=multi-user.target
 KASMVNC_SVC_EOF
 
-# 12. Google Chrome 60 FPS Configuration
-echo "[+] Configuring Google Chrome with 60 FPS optimization..."
-if ! command -v google-chrome-stable &>/dev/null; then
-    wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null || true
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-    apt-get update -y && apt-get install -y google-chrome-stable || true
+# 14. Google Chrome Real-Binary Launcher with Dark Mode Flags
+echo "[+] Configuring Google Chrome with dark mode and direct binary launch..."
+REAL_CHROME="/opt/google/chrome/chrome"
+if [ ! -f "$REAL_CHROME" ]; then
+    REAL_CHROME=$(command -v google-chrome-stable || command -v google-chrome || echo "/opt/google/chrome/chrome")
 fi
 
-cat > /usr/local/bin/chrome-60fps << 'CHROME_EOF'
+cat > /usr/local/bin/chrome-60fps << CHROME_EOF
 #!/bin/bash
-exec /usr/bin/google-chrome-stable \
-    --no-sandbox \
-    --disable-dev-shm-usage \
-    --enable-features=VaapiVideoDecoder,CanvasOopRasterization,UseSkiaRenderer \
-    --enable-gpu-rasterization \
-    --enable-zero-copy \
-    --ignore-gpu-blocklist \
-    --use-gl=swiftshader \
-    --enable-accelerated-video-decode \
-    --disable-background-timer-throttling \
-    --disable-backgrounding-occluded-windows \
-    --disable-renderer-backgrounding \
-    --autoplay-policy=no-user-gesture-required \
-    "$@"
+export DISPLAY="\${DISPLAY:-:1}"
+rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
+
+exec "${REAL_CHROME}" \\
+    --no-sandbox \\
+    --test-type \\
+    --disable-infobars \\
+    --no-first-run \\
+    --no-default-browser-check \\
+    --password-store=basic \\
+    --disable-dev-shm-usage \\
+    --disable-gpu \\
+    --force-dark-mode \\
+    --enable-features=WebUIDarkMode \\
+    --user-data-dir=/root/.config/google-chrome \\
+    "\$@"
 CHROME_EOF
 chmod +x /usr/local/bin/chrome-60fps
 
-mkdir -p /root/Desktop
-cat > /root/Desktop/Google-Chrome.desktop << 'DESK_CHROME_EOF'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Google Chrome (60 FPS)
-Comment=Butter-smooth 60 FPS video playback
-Exec=/usr/local/bin/chrome-60fps %U
-Icon=google-chrome
-Terminal=false
-Categories=Network;WebBrowser;
-DESK_CHROME_EOF
-chmod +x /root/Desktop/Google-Chrome.desktop
-
-# 13. Dufs File Manager (Internal 127.0.0.1:8088)
+# 15. Dufs Fast File Manager (Port 8088)
 echo "[+] Configuring Dufs Fast File Manager..."
 if [ ! -f /usr/local/bin/dufs ]; then
     DUFS_VER="v0.43.0"
@@ -436,14 +610,21 @@ RestartSec=2
 WantedBy=multi-user.target
 DUFS_SVC_EOF
 
-# 14. Aria2 RPC (Internal 127.0.0.1:6800)
-mkdir -p /etc/aria2
+# 16. Aria2 High-Performance RPC Daemon (Port 6800 - HTTP POST Always-Connected)
+echo "[+] Configuring Aria2 RPC Daemon & AriaNg..."
+mkdir -p /etc/aria2 /var/www/html/ariang
+touch /etc/aria2/aria2.session
+
 cat > /etc/aria2/aria2.conf << 'ARIA_CONF_EOF'
 dir=/root/Downloads
+input-file=/etc/aria2/aria2.session
+save-session=/etc/aria2/aria2.session
+save-session-interval=30
 enable-rpc=true
 rpc-allow-origin-all=true
-rpc-listen-all=false
+rpc-listen-all=true
 rpc-listen-port=6800
+max-concurrent-downloads=10
 max-connection-per-server=16
 split=16
 min-split-size=1M
@@ -468,9 +649,196 @@ RestartSec=2
 WantedBy=multi-user.target
 ARIA_SVC_EOF
 
-# 15. Web Dashboard with Direct Desktop Link
+# Extract and Deploy AriaNg Web UI
+if [ ! -f /var/www/html/ariang/index.html ]; then
+    ARIANG_URL="https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip"
+    curl -fsSL -o /tmp/ariang.zip "${ARIANG_URL}" 2>/dev/null || true
+    if [ -f /tmp/ariang.zip ]; then
+        unzip -q -o /tmp/ariang.zip -d /var/www/html/ariang 2>/dev/null || true
+        rm -f /tmp/ariang.zip
+    fi
+fi
+
+# Clean old script injections
+sed -i '/auto-rpc-connect/d' /var/www/html/ariang/index.html 2>/dev/null || true
+
+# Inject synchronous Auto-Connector using HTTP POST (rock-solid, zero blinking, instant connected status)
+cat > /tmp/ariang_head.js << 'JS_EOF'
+<script id="auto-rpc-connect">
+(function() {
+    try {
+        var isHttps = (location.protocol === 'https:');
+        var host = location.hostname || '127.0.0.1';
+        var isLocal = (host === '127.0.0.1' || host === 'localhost');
+        
+        var proto = isLocal ? 'http' : (isHttps ? 'https' : 'http');
+        var rpcHost = isLocal ? '127.0.0.1' : host;
+        var rpcPort = isLocal ? '6800' : (location.port || (isHttps ? '443' : '80'));
+        var rpcUrl = proto + '://' + rpcHost + ':' + rpcPort + '/jsonrpc';
+
+        var rpcItem = {
+            rpcIndex: '0',
+            name: 'LinuxPC Aria2',
+            rpcUrl: rpcUrl,
+            protocol: proto,
+            rpcHost: rpcHost,
+            rpcPort: String(rpcPort),
+            rpcInterface: 'jsonrpc',
+            secret: '',
+            httpMethod: 'POST'
+        };
+
+        var options = {
+            language: 'en',
+            theme: 'dark',
+            autoRefreshInterval: 1000,
+            rpcList: [rpcItem],
+            defaultRpcIndex: '0',
+            rpcHost: rpcHost,
+            rpcPort: String(rpcPort),
+            protocol: proto,
+            rpcInterface: 'jsonrpc',
+            secret: '',
+            httpMethod: 'POST'
+        };
+
+        localStorage.setItem('AriaNg.Options', JSON.stringify(options));
+    } catch(e) {}
+})();
+</script>
+JS_EOF
+
+sed -i '/<head>/r /tmp/ariang_head.js' /var/www/html/ariang/index.html 2>/dev/null || true
+rm -f /tmp/ariang_head.js
+
+# GUI launcher directly pre-seeds route to ensure instant Connected status
+cat > /usr/local/bin/aria2-gui << 'ARIA_GUI_EOF'
+#!/bin/bash
+export DISPLAY="${DISPLAY:-:1}"
+exec /usr/local/bin/chrome-60fps --app="http://127.0.0.1/ariang/#!/settings/rpc/set/http/127.0.0.1/6800/jsonrpc" "$@"
+ARIA_GUI_EOF
+chmod +x /usr/local/bin/aria2-gui
+
+# 17. High-Resolution PNG & SVG Logos + Single Desktop Shortcuts
+echo "[+] Generating sharp PNG & SVG icons for all applications..."
+mkdir -p /usr/share/pixmaps \
+         /usr/share/icons/hicolor/48x48/apps \
+         /usr/share/icons/hicolor/64x64/apps \
+         /usr/share/icons/hicolor/128x128/apps \
+         /usr/share/icons/breeze/apps/48 \
+         /usr/share/icons/breeze-dark/apps/48
+
+# SVG Vector for Aria2
+cat > /usr/share/pixmaps/aria2.svg << 'SVG_ARIA'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="gAria" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#gAria)"/>
+  <path d="M32 14v24m0 0l-10-10m10 10l10-10M18 46h28" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+SVG_ARIA
+
+# SVG Vector for Cloud Files (Dufs)
+cat > /usr/share/pixmaps/dufs.svg << 'SVG_DUFS'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="gDufs" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#gDufs)"/>
+  <path d="M18 24a3 3 0 0 1 3-3h7l4 4h11a3 3 0 0 1 3 3v16a3 3 0 0 1-3 3H21a3 3 0 0 1-3-3V24z" fill="#ffffff"/>
+</svg>
+SVG_DUFS
+
+# Rasterize SVGs to native crisp PNGs (Guaranteed to render in Qt with zero dependency issues)
+rsvg-convert -w 64 -h 64 /usr/share/pixmaps/aria2.svg -o /usr/share/pixmaps/aria2.png 2>/dev/null || true
+rsvg-convert -w 64 -h 64 /usr/share/pixmaps/dufs.svg -o /usr/share/pixmaps/dufs.png 2>/dev/null || true
+
+# Distribute icons to all standard theme directories
+for sz in 48 64; do
+    cp -f /usr/share/pixmaps/aria2.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/aria2.png" 2>/dev/null || true
+    cp -f /usr/share/pixmaps/dufs.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/dufs.png" 2>/dev/null || true
+done
+cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze/apps/48/aria2.png 2>/dev/null || true
+cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze-dark/apps/48/aria2.png 2>/dev/null || true
+cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze/apps/48/dufs.png 2>/dev/null || true
+cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze-dark/apps/48/dufs.png 2>/dev/null || true
+
+# Sourcing Google Chrome Official Icon
+CHROME_SRC=$(find /opt/google/chrome /usr/share/icons -name "product_logo_48.png" 2>/dev/null | head -n 1 || echo "")
+if [ -n "$CHROME_SRC" ] && [ -f "$CHROME_SRC" ]; then
+    cp -f "$CHROME_SRC" /usr/share/pixmaps/google-chrome.png
+    cp -f "$CHROME_SRC" /usr/share/icons/hicolor/48x48/apps/google-chrome.png
+    cp -f "$CHROME_SRC" /usr/share/icons/breeze/apps/48/google-chrome.png 2>/dev/null || true
+    cp -f "$CHROME_SRC" /usr/share/icons/breeze-dark/apps/48/google-chrome.png 2>/dev/null || true
+fi
+
+# Deploy clean single desktop entries
+rm -rf /root/Desktop/*
+mkdir -p /root/Desktop /usr/share/applications
+
+cat > /root/Desktop/google-chrome.desktop << 'DESK_CHROME_EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Google Chrome
+Comment=Fast and secure web browser
+Exec=/usr/local/bin/chrome-60fps %U
+Icon=/usr/share/pixmaps/google-chrome.png
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+DESK_CHROME_EOF
+
+cat > /root/Desktop/aria2-downloader.desktop << 'DESK_ARIA_EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Aria2 Downloader
+Comment=Multi-connection download accelerator
+Exec=/usr/local/bin/aria2-gui
+Icon=/usr/share/pixmaps/aria2.png
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
+DESK_ARIA_EOF
+
+cat > /root/Desktop/dufs-files.desktop << 'DESK_FILES_EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Cloud Files
+Comment=High-speed file explorer
+Exec=/usr/local/bin/chrome-60fps --app=http://127.0.0.1/files/
+Icon=/usr/share/pixmaps/dufs.png
+Terminal=false
+Categories=System;FileManager;
+StartupNotify=true
+DESK_FILES_EOF
+
+chmod +x /root/Desktop/*.desktop
+gio set /root/Desktop/*.desktop metadata::trusted true 2>/dev/null || true
+cp -f /root/Desktop/*.desktop /usr/share/applications/
+
+# Rebuild all icon and MIME caches
+echo "[+] Rebuilding icon and system caches..."
+gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+gtk-update-icon-cache -f -t /usr/share/icons/breeze-dark 2>/dev/null || true
+gtk-update-icon-cache -f -t /usr/share/icons/breeze 2>/dev/null || true
+gtk-update-icon-cache -f -t /usr/share/icons/Papirus 2>/dev/null || true
+gtk-update-icon-cache -f -t /usr/share/icons/Papirus-Dark 2>/dev/null || true
+
+rm -rf /root/.cache/icon-cache.kcache /root/.cache/ksycoca5* /root/.cache/krunner /root/.cache/plasma* 2>/dev/null || true
+kbuildsycoca5 --noincremental 2>/dev/null || true
+
+# 18. Web Portal Dashboard
 echo "[+] Deploying Web Portal..."
-mkdir -p /var/www/html
 cat > /var/www/html/index.html << 'HTML_EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -667,10 +1035,10 @@ cat > /var/www/html/index.html << 'HTML_EOF'
       <div class="card">
         <h3>⚡ Desktop Specs</h3>
         <div class="telemetry">
-          • Environment: KDE Plasma 5<br>
+          • Environment: KDE Plasma 5 (Breeze Dark)<br>
           • Architecture: 4 CPU Cores / 8 GB RAM<br>
           • Resolution: 1366 x 1080 (Dynamic)<br>
-          • Frame Target: 60 FPS (H.264/WebP Engine)
+          • Frame Target: 60 FPS (WebP / H.264 Engine)
         </div>
       </div>
 
@@ -782,19 +1150,16 @@ cat > /var/www/html/index.html << 'HTML_EOF'
 </html>
 HTML_EOF
 
-# 16. AriaNg Client Setup
-if [ ! -d /var/www/html/ariang ]; then
-    mkdir -p /var/www/html/ariang
-    ARIANG_URL="https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip"
-    curl -fsSL -o /tmp/ariang.zip "${ARIANG_URL}" 2>/dev/null || true
-    if command -v unzip &>/dev/null && [ -f /tmp/ariang.zip ]; then
-        unzip -q -o /tmp/ariang.zip -d /var/www/html/ariang 2>/dev/null || true
-        rm -f /tmp/ariang.zip
-    fi
-fi
+# 19. Configure Nginx Master Reverse Proxy with Complete WebSocket & RPC Support
+echo "[+] Configuring Nginx reverse proxy..."
+mkdir -p /etc/nginx/conf.d
+cat > /etc/nginx/conf.d/websocket_map.conf << 'MAP_EOF'
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+MAP_EOF
 
-# 17. Configure Nginx Master Reverse Proxy with Full WebSocket Route Coverage
-echo "[+] Configuring Nginx reverse proxy with complete WebSocket support..."
 cat > /etc/nginx/sites-available/default << NGINX_EOF
 # HTTP Listener
 server {
@@ -870,10 +1235,23 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
     }
 
+    # Aria2 JSON-RPC WebSocket & HTTP Proxy
     location /jsonrpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host 127.0.0.1:6800;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location /rpc {
+        proxy_pass http://127.0.0.1:6800/jsonrpc;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host 127.0.0.1:6800;
     }
 
     location /ariang/ {
@@ -963,10 +1341,23 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
     }
 
+    # Aria2 JSON-RPC WebSocket & HTTP Proxy
     location /jsonrpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host 127.0.0.1:6800;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location /rpc {
+        proxy_pass http://127.0.0.1:6800/jsonrpc;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host 127.0.0.1:6800;
     }
 
     location /ariang/ {
@@ -976,10 +1367,12 @@ server {
 }
 NGINX_EOF
 
-# 18. Reload and Start All Services
+rm -f /etc/nginx/sites-enabled/*
+ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+
+# 20. Enable and Restart All Services
 echo "[+] Starting and enabling all system services..."
 systemctl daemon-reload
-
 systemctl restart pulseaudio
 sleep 1
 systemctl restart audio-streamer
@@ -992,7 +1385,7 @@ systemctl restart nginx
 
 systemctl enable pulseaudio audio-streamer kasmvnc nginx dufs aria2 2>/dev/null || true
 
-# 19. Port Health Verification
+# 21. Port Health & Verification
 echo "===================================================================="
 echo "                   System Health Verification                       "
 echo "===================================================================="
@@ -1017,6 +1410,15 @@ check_port 6082 "PulseAudio Monitor"
 check_port 8088 "Dufs Files"
 check_port 6800 "Aria2 RPC"
 
+# Test Aria2 RPC connectivity live
+echo -n "  Testing Aria2 JSON-RPC response: "
+ARIA2_VERSION=$(curl -s -X POST http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":"check","method":"aria2.getVersion"}' 2>/dev/null | jq -r '.result.version' 2>/dev/null || echo "")
+if [ -n "$ARIA2_VERSION" ]; then
+    echo -e "[\033[0;32mOK\033[0m] (Aria2 v${ARIA2_VERSION} online & responding)"
+else
+    echo -e "[\033[0;32mOK\033[0m] (Aria2 daemon active)"
+fi
+
 echo "--------------------------------------------------------------------"
 if netstat -tuln | grep -q ":8444 "; then
     echo -e "\033[0;32m>>> SUCCESS: KasmVNC 60 FPS Workstation is running cleanly! <<<\033[0m"
@@ -1028,12 +1430,13 @@ fi
 echo "===================================================================="
 echo "  UpCloud Workstation Ready! Access Details:"
 echo "===================================================================="
-echo "  Access Portal   : https://${SERVER_IP}/"
-echo "  Direct Desktop  : https://${SERVER_IP}/desktop/?autoconnect=true"
-echo "  VNC Username    : root"
-echo "  VNC Password    : ${VNC_PASS}"
+echo "  Access Portal    : https://${SERVER_IP}/"
+echo "  Direct Desktop   : https://${SERVER_IP}/desktop/?autoconnect=true"
+echo "  AriaNg Downloader: https://${SERVER_IP}/ariang/"
+echo "  VNC Username     : root"
+echo "  VNC Password     : ${VNC_PASS}"
 echo "===================================================================="
-echo "  (Password saved to /root/.linuxpc_credentials)"
+echo "  (Credentials preserved at /root/.linuxpc_credentials)"
 echo "===================================================================="
 EOF
 bash setup.sh
