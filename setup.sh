@@ -1,43 +1,66 @@
-rm -f setup.sh
 cat > setup.sh << 'EOF'
 #!/bin/bash
 # ==============================================================================
-# LinuxPC Cloud Workstation Setup - KasmVNC 60 FPS & WebSocket Bridge Fix
-# Strict UpCloud Open Firewall Ports (80, 443, 8443, 22, 3389)
-# Aria2 Always-Connected (HTTP POST) + Complete System & App Icon Engine + Dark Mode
+# LinuxPC Cloud Workstation Setup - KasmVNC 60 FPS & Multi-Service Audio Suite
+# Supported OS: Ubuntu 22.04 LTS (Jammy Jellyfish) - UpCloud VPS Optimized
+# Ports: 22 (SSH), 80 (HTTP), 443 (HTTPS), 8443 (Alt HTTPS)
+# Services: KasmVNC, KDE Plasma, PulseAudio, Audio Streamer, Dufs, Aria2, Nginx
 # ==============================================================================
 set -e
 
-SERVER_IP="95.111.195.58"
+echo "===================================================================="
+echo "      Starting LinuxPC Workstation Setup (Ubuntu 22.04 / UpCloud)   "
+echo "===================================================================="
 
-# 1. Maintain or generate strong credentials
+# ------------------------------------------------------------------------------
+# 1. Environment & Dynamic Variables Detection
+# ------------------------------------------------------------------------------
+ARCH=$(uname -m)
+if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ]; then
+    echo "[-] Unsupported CPU architecture: $ARCH"
+    exit 1
+fi
+
+echo "[+] Detecting Server Public IP..."
+SERVER_IP="${SERVER_IP:-$(curl -4s --max-time 4 https://ifconfig.me 2>/dev/null || curl -4s --max-time 4 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')}"
+[ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
+echo "[+] Target Public IP: ${SERVER_IP}"
+
+# Maintain existing credentials or generate a strong new password
 if [ -f /root/.linuxpc_credentials ]; then
     VNC_PASS=$(grep -i "Password" /root/.linuxpc_credentials | awk '{print $NF}')
 fi
 if [ -z "$VNC_PASS" ]; then
     VNC_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 14)
 fi
-BASIC_AUTH_B64=$(echo -n "root:${VNC_PASS}" | base64)
+BASIC_AUTH_B64=$(printf "%s" "root:${VNC_PASS}" | base64 | tr -d '\n')
 
-echo "===================================================================="
-echo "  Starting LinuxPC Cloud Setup (Aria2 Auto-Connect & Icon Engine Fix)"
-echo "===================================================================="
-
-# 2. Terminate legacy processes and clean display locks
-echo "[+] Cleaning legacy processes and freeing X11 display locks..."
-systemctl stop kasmvnc tigervnc websockify audio-streamer dufs aria2 2>/dev/null || true
+# ------------------------------------------------------------------------------
+# 2. Cleanup Legacy Processes, Locks & Port Holders
+# ------------------------------------------------------------------------------
+echo "[+] Cleaning legacy processes and freeing X11 display & network ports..."
+systemctl stop kasmvnc pulseaudio audio-streamer dufs aria2 nginx websockify 2>/dev/null || true
 pkill -9 -f Xvnc 2>/dev/null || true
 pkill -9 -f kasmvnc 2>/dev/null || true
-pkill -9 -f websockify 2>/dev/null || true
-pkill -9 -f dufs 2>/dev/null || true
 pkill -9 -f pulseaudio 2>/dev/null || true
-pkill -9 -f chrome 2>/dev/null || true
+pkill -9 -f audio-streamer 2>/dev/null || true
+pkill -9 -f dufs 2>/dev/null || true
 pkill -9 -f aria2c 2>/dev/null || true
+pkill -9 -f chrome 2>/dev/null || true
+pkill -9 -f websockify 2>/dev/null || true
+
+# Force release audio & websocket ports
+fuser -k 6081/tcp 2>/dev/null || true
+fuser -k 6082/tcp 2>/dev/null || true
+fuser -k 8444/tcp 2>/dev/null || true
+
 rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
 rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
 
-# 3. Kernel & TCP network buffer tuning for zero-latency 60 FPS streaming
-echo "[+] Optimizing network stack and socket buffers..."
+# ------------------------------------------------------------------------------
+# 3. Kernel & TCP Socket Low-Latency Tuning
+# ------------------------------------------------------------------------------
+echo "[+] Optimizing network stack and socket buffers for 60 FPS streaming..."
 cat > /etc/sysctl.d/99-linuxpc-latency.conf << 'SYSCTL_EOF'
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
@@ -49,18 +72,28 @@ net.ipv4.tcp_notsent_lowat = 16384
 SYSCTL_EOF
 sysctl -p /etc/sysctl.d/99-linuxpc-latency.conf >/dev/null 2>&1 || true
 
-# 4. Superfast APT Configuration & Clean Keys
-echo "[+] Speeding up APT repositories..."
+# ------------------------------------------------------------------------------
+# 4. APT Initialization & Safe Lock Handling
+# ------------------------------------------------------------------------------
+echo "[+] Preparing APT environment..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-rm -f /etc/apt/sources.list.d/brave-browser*.list /etc/apt/trusted.gpg.d/brave-browser*.gpg /usr/share/keyrings/brave-browser*.gpg 2>/dev/null || true
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    echo "[i] Waiting for background updates / cloud-init to release APT lock..."
+    sleep 3
+done
+
+rm -f /etc/apt/sources.list.d/brave-browser*.list /etc/apt/trusted.gpg.d/brave-browser*.gpg 2>/dev/null || true
 echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99translations 2>/dev/null || true
 
-# 5. Core Desktop, SVG Icon Renderers, Utilities & Theme Packages Installation
-echo "[+] Installing full desktop stack, SVG & PNG icon engines, and tools..."
 apt-get update -qq
+
+# ------------------------------------------------------------------------------
+# 5. Core Desktop Stack, Themes, Tools & Dependencies
+# ------------------------------------------------------------------------------
+echo "[+] Installing full desktop stack, SVG & PNG icon engines, and tools..."
 apt-get install -y -qq \
     kde-plasma-desktop \
     plasma-desktop \
@@ -114,31 +147,49 @@ apt-get install -y -qq \
     unzip \
     ca-certificates \
     openssl \
-    net-tools
+    net-tools \
+    ufw
 
-if [ -f /usr/bin/startplasma-x11 ]; then
-    ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde
+[ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# 6. Install Google Chrome Stable
+# ------------------------------------------------------------------------------
+if ! command -v google-chrome >/dev/null 2>&1; then
+    echo "[+] Installing Google Chrome Stable..."
+    wget -q -O /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" 2>/dev/null || true
+    if [ -f /tmp/google-chrome.deb ]; then
+        apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+        rm -f /tmp/google-chrome.deb
+    fi
 fi
 
-# 6. Verify KasmVNC 1.5.0 Installation
+# ------------------------------------------------------------------------------
+# 7. Install KasmVNC Server 1.5.0
+# ------------------------------------------------------------------------------
 if ! dpkg -l | grep -q kasmvncserver; then
-    KASMVNC_DEB="kasmvncserver_jammy_1.5.0_amd64.deb"
+    KASMVNC_DEB="kasmvncserver_jammy_1.5.0_${ARCH}.deb"
+    [ "$ARCH" = "x86_64" ] && KASMVNC_DEB="kasmvncserver_jammy_1.5.0_amd64.deb"
+    [ "$ARCH" = "aarch64" ] && KASMVNC_DEB="kasmvncserver_jammy_1.5.0_arm64.deb"
+
+    echo "[+] Downloading and installing KasmVNC (${KASMVNC_DEB})..."
     KASMVNC_URL="https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/${KASMVNC_DEB}"
-    echo "[+] Downloading ${KASMVNC_DEB}..."
     curl -fSL -o "/tmp/${KASMVNC_DEB}" "${KASMVNC_URL}"
     apt-get install -y "/tmp/${KASMVNC_DEB}" || apt-get install -f -y
     rm -f "/tmp/${KASMVNC_DEB}"
 fi
 
+usermod -a -G ssl-cert root 2>/dev/null || true
 if [ -f /usr/lib/kasmvncserver/select-de.sh ]; then
     sed -i 's/startkde/startplasma-x11/g' /usr/lib/kasmvncserver/select-de.sh 2>/dev/null || true
 fi
 
-# 7. Configure System-Wide & User Dark Mode + Icon Themes
-echo "[+] Configuring permanent Dark Mode and Breeze Dark icon themes..."
+# ------------------------------------------------------------------------------
+# 8. Dark Mode, Compositor Optimization & Desktop Configuration
+# ------------------------------------------------------------------------------
+echo "[+] Configuring permanent Dark Mode & zero-overhead X11 rendering..."
 mkdir -p /root/.config /root/.config/gtk-3.0 /root/.config/gtk-4.0 /etc/xdg
 
-# System-Wide Defaults
 cat > /etc/xdg/kdeglobals << 'KDE_SYS_EOF'
 [General]
 ColorScheme=BreezeDark
@@ -161,7 +212,6 @@ library=org.kde.breeze
 theme=Breeze
 KDE_SYS_EOF
 
-# User Settings
 cat > /root/.config/kdeglobals << 'KDE_EOF'
 [General]
 ColorScheme=BreezeDark
@@ -224,7 +274,6 @@ LockOnResume=false
 Timeout=0
 LOCK_EOF
 
-# GTK 2, 3, and 4 Dark Mode Configuration (for Chrome and GTK apps)
 cat > /root/.gtkrc-2.0 << 'GTK2_EOF'
 gtk-theme-name="Breeze-Dark"
 gtk-icon-theme-name="breeze-dark"
@@ -247,18 +296,14 @@ gtk-font-name=Noto Sans 10
 gtk-application-prefer-dark-theme=1
 GTK4_EOF
 
-# Apply look & feel via KDE CLI tools
-if command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
-    plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
-fi
-if command -v plasma-apply-colorscheme >/dev/null 2>&1; then
-    plasma-apply-colorscheme BreezeDark 2>/dev/null || true
-fi
+command -v plasma-apply-lookandfeel >/dev/null 2>&1 && plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
+command -v plasma-apply-colorscheme >/dev/null 2>&1 && plasma-apply-colorscheme BreezeDark 2>/dev/null || true
 
-# 8. Setup SSL Certificates
-echo "[+] Generating and securing SSL certificates..."
+# ------------------------------------------------------------------------------
+# 9. SSL Certificates Setup
+# ------------------------------------------------------------------------------
+echo "[+] Generating SSL Snakeoil & Nginx SAN Certificates..."
 make-ssl-cert generate-default-snakeoil --force-overwrite 2>/dev/null || true
-usermod -a -G ssl-cert root 2>/dev/null || true
 chown root:ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
 chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
 
@@ -293,20 +338,30 @@ openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     -config /tmp/openssl_san.cnf 2>/dev/null || true
 rm -f /tmp/openssl_san.cnf
 
-# 9. Automated VNC Security Credentials Generation
-echo "[+] Setting up VNC security credentials..."
+# ------------------------------------------------------------------------------
+# 10. Automated KasmVNC Credentials Configuration (With -wo Write Permissions)
+# ------------------------------------------------------------------------------
+echo "[+] Configuring KasmVNC user credentials with Owner & Write permissions..."
 mkdir -p /root/.vnc /etc/kasmvnc
 touch /root/.vnc/.de-was-selected
 
+# Purge any stale or corrupt password files
+rm -f /root/.kasmpasswd /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd /etc/kasmvnc/kasmvncpasswd.bak 2>/dev/null || true
+
+# Create root user with explicit Write (-w) and Owner (-o) flags
+printf "%s\n%s\n" "${VNC_PASS}" "${VNC_PASS}" | kasmvncpasswd -u root -wo 2>/dev/null || true
+
+# Fallback pty creator if pipe didn't populate
+if [ ! -f /root/.kasmpasswd ] || ! grep -q "^root:" /root/.kasmpasswd 2>/dev/null; then
 python3 - << PY_AUTH_EOF
-import os, pty, select, subprocess, time, sys
+import os, pty, select, subprocess, time
 
 password = "${VNC_PASS}"
 username = "root"
 
 master, slave = pty.openpty()
 proc = subprocess.Popen(
-    ["kasmvncpasswd", "-u", username],
+    ["kasmvncpasswd", "-u", username, "-wo"],
     stdin=slave, stdout=slave, stderr=slave, close_fds=True
 )
 os.close(slave)
@@ -323,7 +378,7 @@ while proc.poll() is None and (time.time() - start) < 6:
                 time.sleep(0.1)
                 os.write(master, (password + "\n").encode())
                 passwords_sent += 1
-            elif "select" in chunk.lower() or "action" in chunk.lower() or "access" in chunk.lower():
+            elif any(k in chunk.lower() for k in ["select", "action", "access", "mode"]):
                 time.sleep(0.1)
                 os.write(master, b"1\n")
         except OSError:
@@ -336,12 +391,18 @@ except Exception:
 
 proc.wait(timeout=3)
 PY_AUTH_EOF
+fi
 
-for p in /root/.kasmpasswd /root/.vnc/.kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
-    if [ -f /root/.kasmpasswd ] && [ "$p" != "/root/.kasmpasswd" ]; then
-        cp -f /root/.kasmpasswd "$p" 2>/dev/null || true
-    fi
-    [ -f "$p" ] && chmod 600 "$p"
+# Guarantee the permissions field strictly ends with ':ow'
+if [ -f /root/.kasmpasswd ]; then
+    sed -i 's/^\(root:[^:]*\)\(:.*\)\?$/\1:ow/' /root/.kasmpasswd 2>/dev/null || true
+fi
+
+# Distribute password file to all required locations
+for p in /root/.kasmpasswd /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
+    mkdir -p "$(dirname "$p")"
+    [ -f /root/.kasmpasswd ] && cp -f /root/.kasmpasswd "$p" 2>/dev/null || true
+    [ -f "$p" ] && chmod 600 "$p" 2>/dev/null || true
 done
 
 cat > /root/.linuxpc_credentials << CRED_EOF
@@ -349,11 +410,14 @@ LinuxPC Cloud Workstation Credentials
 ======================================
 Username : root
 Password : ${VNC_PASS}
+Server IP: ${SERVER_IP}
 Generated: $(date)
 CRED_EOF
 chmod 600 /root/.linuxpc_credentials
 
-# 10. Configure xstartup with Qt Plugin Paths & SVG Support
+# ------------------------------------------------------------------------------
+# 11. Xstartup Session and Validated KasmVNC YAML Settings
+# ------------------------------------------------------------------------------
 cat > /root/.vnc/xstartup << 'XSTARTUP_EOF'
 #!/bin/bash
 unset SESSION_MANAGER
@@ -364,6 +428,7 @@ export DESKTOP_SESSION=plasma
 export KDE_FULL_SESSION=true
 export QT_QPA_PLATFORM=xcb
 export DISPLAY=:1
+export PULSE_SERVER=127.0.0.1:4713
 
 export QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
@@ -378,7 +443,6 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
 
-# Apply dark look and feel & rebuild sycoca cache
 plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
 plasma-apply-colorscheme BreezeDark 2>/dev/null || true
 kbuildsycoca5 --noincremental 2>/dev/null || true
@@ -396,12 +460,13 @@ XSTARTUP_EOF
 chmod +x /root/.vnc/xstartup
 cp -f /root/.vnc/xstartup /etc/kasmvnc/xstartup 2>/dev/null || true
 
-# Strict KasmVNC YAML Configuration
+# Strict valid YAML syntax (allow_resize directly under desktop)
 cat > /etc/kasmvnc/kasmvnc.yaml << 'YAML_EOF'
 desktop:
   resolution:
     width: 1366
     height: 1080
+  allow_resize: true
 network:
   interface: 127.0.0.1
   websocket_port: 8444
@@ -414,8 +479,10 @@ encoding:
 YAML_EOF
 cp -f /etc/kasmvnc/kasmvnc.yaml /root/.vnc/kasmvnc.yaml 2>/dev/null || true
 
-# 11. PulseAudio System Configuration (Ports 4713 & 6082)
-echo "[+] Configuring PulseAudio system daemon..."
+# ------------------------------------------------------------------------------
+# 12. PulseAudio Headless Sound Server (Ports 4713 & 6082)
+# ------------------------------------------------------------------------------
+echo "[+] Setting up PulseAudio low-latency streaming pipeline..."
 cat > /etc/pulse/system.pa << 'PULSE_EOF'
 load-module module-null-sink sink_name=VirtualSink sink_properties=device.description="LinuxPC_Virtual_Sink"
 set-default-sink VirtualSink
@@ -431,7 +498,7 @@ PULSE_CLIENT_EOF
 
 cat > /etc/systemd/system/pulseaudio.service << 'PULSE_SVC_EOF'
 [Unit]
-Description=PulseAudio System Sound Daemon (Low Latency)
+Description=PulseAudio System Sound Daemon
 After=network.target
 
 [Service]
@@ -439,7 +506,7 @@ Type=simple
 User=root
 Environment=HOME=/root
 ExecStartPre=-/usr/bin/pulseaudio -k
-ExecStart=/usr/bin/pulseaudio --system --disallow-exit --disallow-module-loading=0 --exit-idle-time=-1 --realtime=true
+ExecStart=/usr/bin/pulseaudio --system --disallow-exit --disallow-module-loading=0 --exit-idle-time=-1 --realtime=true --log-target=journal
 Restart=always
 RestartSec=2
 
@@ -447,8 +514,10 @@ RestartSec=2
 WantedBy=multi-user.target
 PULSE_SVC_EOF
 
-# 12. Python Low-Latency Audio WebSocket Streamer (Port 6081)
-echo "[+] Setting up Audio Streamer Service..."
+# ------------------------------------------------------------------------------
+# 13. Low-Latency Audio WebSocket Bridge (Port 6081)
+# ------------------------------------------------------------------------------
+echo "[+] Deploying Python Audio WebSocket Streamer..."
 cat > /usr/local/bin/audio-streamer.py << 'PY_AUDIO_EOF'
 #!/usr/bin/env python3
 import asyncio
@@ -469,7 +538,7 @@ async def pulse_reader():
                     break
                 if CLIENTS:
                     dead = set()
-                    for ws in CLIENTS:
+                    for ws in list(CLIENTS):
                         try:
                             await ws.send(data)
                         except Exception:
@@ -478,7 +547,7 @@ async def pulse_reader():
         except Exception:
             await asyncio.sleep(1.5)
 
-async def ws_handler(websocket):
+async def ws_handler(websocket, *args, **kwargs):
     CLIENTS.add(websocket)
     try:
         await websocket.wait_closed()
@@ -513,13 +582,24 @@ RestartSec=2
 WantedBy=multi-user.target
 AUDIO_SVC_EOF
 
-# 13. KasmVNC Startup Launcher (Port 8444 - 60 FPS Native)
+# ------------------------------------------------------------------------------
+# 14. KasmVNC 60 FPS Launcher & Auto-Permission Enforcement
+# ------------------------------------------------------------------------------
 echo "[+] Configuring KasmVNC 60 FPS launcher..."
 cat > /usr/local/bin/kasmvnc-launcher << 'LAUNCHER_EOF'
 #!/bin/bash
 /usr/bin/vncserver -kill :1 2>/dev/null || true
 rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
-[ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde
+[ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde 2>/dev/null || true
+
+# Enforce :ow permissions before invoking vncserver to eliminate interactive prompts
+if [ -f /root/.kasmpasswd ]; then
+    sed -i 's/^\(root:[^:]*\)\(:.*\)\?$/\1:ow/' /root/.kasmpasswd 2>/dev/null || true
+    for p in /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
+        cp -f /root/.kasmpasswd "$p" 2>/dev/null || true
+        chmod 600 "$p" 2>/dev/null || true
+    done
+fi
 
 exec /usr/bin/vncserver -fg :1 \
     -geometry 1366x1080 \
@@ -544,6 +624,7 @@ User=root
 Environment=HOME=/root
 Environment=USER=root
 Environment=DISPLAY=:1
+Environment=PULSE_SERVER=127.0.0.1:4713
 WorkingDirectory=/root
 ExecStartPre=-/bin/rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log
 ExecStart=/usr/local/bin/kasmvnc-launcher
@@ -557,39 +638,42 @@ TimeoutStopSec=10
 WantedBy=multi-user.target
 KASMVNC_SVC_EOF
 
-# 14. Google Chrome Real-Binary Launcher with Dark Mode Flags
-echo "[+] Configuring Google Chrome with dark mode and direct binary launch..."
-REAL_CHROME="/opt/google/chrome/chrome"
-if [ ! -f "$REAL_CHROME" ]; then
-    REAL_CHROME=$(command -v google-chrome-stable || command -v google-chrome || echo "/opt/google/chrome/chrome")
-fi
-
-cat > /usr/local/bin/chrome-60fps << CHROME_EOF
+# ------------------------------------------------------------------------------
+# 15. Google Chrome 60 FPS Headless Binary Wrapper
+# ------------------------------------------------------------------------------
+cat > /usr/local/bin/chrome-60fps << 'CHROME_EOF'
 #!/bin/bash
-export DISPLAY="\${DISPLAY:-:1}"
+export DISPLAY="${DISPLAY:-:1}"
+export PULSE_SERVER="127.0.0.1:4713"
 rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
 
-exec "${REAL_CHROME}" \\
-    --no-sandbox \\
-    --test-type \\
-    --disable-infobars \\
-    --no-first-run \\
-    --no-default-browser-check \\
-    --password-store=basic \\
-    --disable-dev-shm-usage \\
-    --disable-gpu \\
-    --force-dark-mode \\
-    --enable-features=WebUIDarkMode \\
-    --user-data-dir=/root/.config/google-chrome \\
-    "\$@"
+REAL_CHROME=$(command -v google-chrome-stable || command -v google-chrome || echo "/opt/google/chrome/chrome")
+
+exec "${REAL_CHROME}" \
+    --no-sandbox \
+    --test-type \
+    --disable-infobars \
+    --no-first-run \
+    --no-default-browser-check \
+    --password-store=basic \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --force-dark-mode \
+    --enable-features=WebUIDarkMode \
+    --user-data-dir=/root/.config/google-chrome \
+    "$@"
 CHROME_EOF
 chmod +x /usr/local/bin/chrome-60fps
 
-# 15. Dufs Fast File Manager (Port 8088)
+# ------------------------------------------------------------------------------
+# 16. Dufs File Explorer (Port 8088)
+# ------------------------------------------------------------------------------
 echo "[+] Configuring Dufs Fast File Manager..."
 if [ ! -f /usr/local/bin/dufs ]; then
+    DUFS_ARCH="x86_64"
+    [ "$ARCH" = "aarch64" ] && DUFS_ARCH="aarch64"
     DUFS_VER="v0.43.0"
-    curl -fsSL "https://github.com/sigoden/dufs/releases/download/${DUFS_VER}/dufs-${DUFS_VER}-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /usr/local/bin dufs 2>/dev/null || true
+    curl -fsSL "https://github.com/sigoden/dufs/releases/download/${DUFS_VER}/dufs-${DUFS_VER}-${DUFS_ARCH}-unknown-linux-musl.tar.gz" | tar -xz -C /usr/local/bin dufs 2>/dev/null || true
     chmod +x /usr/local/bin/dufs 2>/dev/null || true
 fi
 
@@ -610,8 +694,10 @@ RestartSec=2
 WantedBy=multi-user.target
 DUFS_SVC_EOF
 
-# 16. Aria2 High-Performance RPC Daemon (Port 6800 - HTTP POST Always-Connected)
-echo "[+] Configuring Aria2 RPC Daemon & AriaNg..."
+# ------------------------------------------------------------------------------
+# 17. Aria2 High-Performance RPC Daemon & AriaNg (Port 6800)
+# ------------------------------------------------------------------------------
+echo "[+] Setting up Aria2 RPC Daemon & AriaNg..."
 mkdir -p /etc/aria2 /var/www/html/ariang
 touch /etc/aria2/aria2.session
 
@@ -649,7 +735,6 @@ RestartSec=2
 WantedBy=multi-user.target
 ARIA_SVC_EOF
 
-# Extract and Deploy AriaNg Web UI
 if [ ! -f /var/www/html/ariang/index.html ]; then
     ARIANG_URL="https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip"
     curl -fsSL -o /tmp/ariang.zip "${ARIANG_URL}" 2>/dev/null || true
@@ -659,10 +744,8 @@ if [ ! -f /var/www/html/ariang/index.html ]; then
     fi
 fi
 
-# Clean old script injections
 sed -i '/auto-rpc-connect/d' /var/www/html/ariang/index.html 2>/dev/null || true
 
-# Inject synchronous Auto-Connector using HTTP POST (rock-solid, zero blinking, instant connected status)
 cat > /tmp/ariang_head.js << 'JS_EOF'
 <script id="auto-rpc-connect">
 (function() {
@@ -670,7 +753,6 @@ cat > /tmp/ariang_head.js << 'JS_EOF'
         var isHttps = (location.protocol === 'https:');
         var host = location.hostname || '127.0.0.1';
         var isLocal = (host === '127.0.0.1' || host === 'localhost');
-        
         var proto = isLocal ? 'http' : (isHttps ? 'https' : 'http');
         var rpcHost = isLocal ? '127.0.0.1' : host;
         var rpcPort = isLocal ? '6800' : (location.port || (isHttps ? '443' : '80'));
@@ -711,7 +793,6 @@ JS_EOF
 sed -i '/<head>/r /tmp/ariang_head.js' /var/www/html/ariang/index.html 2>/dev/null || true
 rm -f /tmp/ariang_head.js
 
-# GUI launcher directly pre-seeds route to ensure instant Connected status
 cat > /usr/local/bin/aria2-gui << 'ARIA_GUI_EOF'
 #!/bin/bash
 export DISPLAY="${DISPLAY:-:1}"
@@ -719,16 +800,16 @@ exec /usr/local/bin/chrome-60fps --app="http://127.0.0.1/ariang/#!/settings/rpc/
 ARIA_GUI_EOF
 chmod +x /usr/local/bin/aria2-gui
 
-# 17. High-Resolution PNG & SVG Logos + Single Desktop Shortcuts
-echo "[+] Generating sharp PNG & SVG icons for all applications..."
+# ------------------------------------------------------------------------------
+# 18. SVG & Crisp PNG Icon Generation + Desktop Application Launchers
+# ------------------------------------------------------------------------------
+echo "[+] Generating sharp application vector icons..."
 mkdir -p /usr/share/pixmaps \
          /usr/share/icons/hicolor/48x48/apps \
          /usr/share/icons/hicolor/64x64/apps \
-         /usr/share/icons/hicolor/128x128/apps \
          /usr/share/icons/breeze/apps/48 \
          /usr/share/icons/breeze-dark/apps/48
 
-# SVG Vector for Aria2
 cat > /usr/share/pixmaps/aria2.svg << 'SVG_ARIA'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <defs>
@@ -742,7 +823,6 @@ cat > /usr/share/pixmaps/aria2.svg << 'SVG_ARIA'
 </svg>
 SVG_ARIA
 
-# SVG Vector for Cloud Files (Dufs)
 cat > /usr/share/pixmaps/dufs.svg << 'SVG_DUFS'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <defs>
@@ -756,11 +836,9 @@ cat > /usr/share/pixmaps/dufs.svg << 'SVG_DUFS'
 </svg>
 SVG_DUFS
 
-# Rasterize SVGs to native crisp PNGs (Guaranteed to render in Qt with zero dependency issues)
 rsvg-convert -w 64 -h 64 /usr/share/pixmaps/aria2.svg -o /usr/share/pixmaps/aria2.png 2>/dev/null || true
 rsvg-convert -w 64 -h 64 /usr/share/pixmaps/dufs.svg -o /usr/share/pixmaps/dufs.png 2>/dev/null || true
 
-# Distribute icons to all standard theme directories
 for sz in 48 64; do
     cp -f /usr/share/pixmaps/aria2.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/aria2.png" 2>/dev/null || true
     cp -f /usr/share/pixmaps/dufs.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/dufs.png" 2>/dev/null || true
@@ -770,7 +848,6 @@ cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze-dark/apps/48/aria2.pn
 cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze/apps/48/dufs.png 2>/dev/null || true
 cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze-dark/apps/48/dufs.png 2>/dev/null || true
 
-# Sourcing Google Chrome Official Icon
 CHROME_SRC=$(find /opt/google/chrome /usr/share/icons -name "product_logo_48.png" 2>/dev/null | head -n 1 || echo "")
 if [ -n "$CHROME_SRC" ] && [ -f "$CHROME_SRC" ]; then
     cp -f "$CHROME_SRC" /usr/share/pixmaps/google-chrome.png
@@ -779,7 +856,6 @@ if [ -n "$CHROME_SRC" ] && [ -f "$CHROME_SRC" ]; then
     cp -f "$CHROME_SRC" /usr/share/icons/breeze-dark/apps/48/google-chrome.png 2>/dev/null || true
 fi
 
-# Deploy clean single desktop entries
 rm -rf /root/Desktop/*
 mkdir -p /root/Desktop /usr/share/applications
 
@@ -826,18 +902,9 @@ chmod +x /root/Desktop/*.desktop
 gio set /root/Desktop/*.desktop metadata::trusted true 2>/dev/null || true
 cp -f /root/Desktop/*.desktop /usr/share/applications/
 
-# Rebuild all icon and MIME caches
-echo "[+] Rebuilding icon and system caches..."
-gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
-gtk-update-icon-cache -f -t /usr/share/icons/breeze-dark 2>/dev/null || true
-gtk-update-icon-cache -f -t /usr/share/icons/breeze 2>/dev/null || true
-gtk-update-icon-cache -f -t /usr/share/icons/Papirus 2>/dev/null || true
-gtk-update-icon-cache -f -t /usr/share/icons/Papirus-Dark 2>/dev/null || true
-
-rm -rf /root/.cache/icon-cache.kcache /root/.cache/ksycoca5* /root/.cache/krunner /root/.cache/plasma* 2>/dev/null || true
-kbuildsycoca5 --noincremental 2>/dev/null || true
-
-# 18. Web Portal Dashboard
+# ------------------------------------------------------------------------------
+# 19. Web Dashboard Portal
+# ------------------------------------------------------------------------------
 echo "[+] Deploying Web Portal..."
 cat > /var/www/html/index.html << 'HTML_EOF'
 <!DOCTYPE html>
@@ -1008,13 +1075,13 @@ cat > /var/www/html/index.html << 'HTML_EOF'
   <div class="container">
     <div class="header">
       <h1 class="title">LinuxPC Cloud Workstation</h1>
-      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • UpCloud Singapore</div>
+      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • UpCloud Cloud Stack</div>
     </div>
 
     <div class="hero-card">
       <h2 style="font-size: 1.5rem; margin-bottom: 0.75rem;">Interactive Desktop Session</h2>
       <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
-        Zero-lag 60 FPS video playback in Google Chrome, real-time PulseAudio sound, and KDE Plasma 5 suite.
+        60 FPS video playback in Google Chrome, real-time PulseAudio sound, and KDE Plasma Breeze Dark suite.
       </p>
       
       <a href="/desktop/?autoconnect=true" target="_blank" class="btn-launch">
@@ -1035,10 +1102,10 @@ cat > /var/www/html/index.html << 'HTML_EOF'
       <div class="card">
         <h3>⚡ Desktop Specs</h3>
         <div class="telemetry">
-          • Environment: KDE Plasma 5 (Breeze Dark)<br>
-          • Architecture: 4 CPU Cores / 8 GB RAM<br>
-          • Resolution: 1366 x 1080 (Dynamic)<br>
-          • Frame Target: 60 FPS (WebP / H.264 Engine)
+          • Environment: KDE Plasma (Breeze Dark)<br>
+          • Frame Target: 60 FPS (WebP / H.264 Engine)<br>
+          • Direct Audio: PCM 44.1 kHz via WebSocket<br>
+          • Resolution: Dynamic Adaptive Scaling
         </div>
       </div>
 
@@ -1150,8 +1217,10 @@ cat > /var/www/html/index.html << 'HTML_EOF'
 </html>
 HTML_EOF
 
-# 19. Configure Nginx Master Reverse Proxy with Complete WebSocket & RPC Support
-echo "[+] Configuring Nginx reverse proxy..."
+# ------------------------------------------------------------------------------
+# 20. Nginx Master Reverse Proxy Configuration
+# ------------------------------------------------------------------------------
+echo "[+] Configuring Nginx reverse proxy routing..."
 mkdir -p /etc/nginx/conf.d
 cat > /etc/nginx/conf.d/websocket_map.conf << 'MAP_EOF'
 map $http_upgrade $connection_upgrade {
@@ -1161,7 +1230,7 @@ map $http_upgrade $connection_upgrade {
 MAP_EOF
 
 cat > /etc/nginx/sites-available/default << NGINX_EOF
-# HTTP Listener
+# HTTP (Port 80)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -1169,7 +1238,7 @@ server {
 
     root /var/www/html;
     index index.html;
-    client_max_body_size 10240M;
+    client_max_body_size 0;
 
     gzip on;
     gzip_vary on;
@@ -1182,11 +1251,11 @@ server {
     }
 
     # KasmVNC Desktop Direct Proxy
-    location /desktop/ {
+    location ^~ /desktop/ {
         proxy_pass https://127.0.0.1:8444/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host 127.0.0.1:8444;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1199,12 +1268,12 @@ server {
         proxy_redirect / /desktop/;
     }
 
-    # Global WebSocket & Asset Handler for KasmVNC
+    # KasmVNC Assets & WebSockets
     location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
         proxy_pass https://127.0.0.1:8444;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host 127.0.0.1:8444;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1216,27 +1285,29 @@ server {
         proxy_buffering off;
     }
 
-    # PulseAudio WebSocket Bridge
-    location /audio {
+    # PulseAudio WebSocket Stream
+    location ^~ /audio {
         proxy_pass http://127.0.0.1:6081/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
     }
 
-    location /files/ {
+    # Dufs Files
+    location ^~ /files/ {
         proxy_pass http://127.0.0.1:8088/;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        client_max_body_size 0;
     }
 
-    # Aria2 JSON-RPC WebSocket & HTTP Proxy
-    location /jsonrpc {
+    # Aria2 JSON-RPC
+    location ^~ /jsonrpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1246,7 +1317,7 @@ server {
         proxy_send_timeout 3600s;
     }
 
-    location /rpc {
+    location ^~ /rpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1254,13 +1325,14 @@ server {
         proxy_set_header Host 127.0.0.1:6800;
     }
 
-    location /ariang/ {
+    # AriaNg Web Application
+    location ^~ /ariang/ {
         alias /var/www/html/ariang/;
         try_files \$uri \$uri/ /ariang/index.html;
     }
 }
 
-# HTTPS Listener (Ports 443 & 8443)
+# HTTPS (Ports 443 & 8443)
 server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
@@ -1275,7 +1347,7 @@ server {
 
     root /var/www/html;
     index index.html;
-    client_max_body_size 10240M;
+    client_max_body_size 0;
 
     gzip on;
     gzip_vary on;
@@ -1288,11 +1360,11 @@ server {
     }
 
     # KasmVNC Desktop Direct Proxy
-    location /desktop/ {
+    location ^~ /desktop/ {
         proxy_pass https://127.0.0.1:8444/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host 127.0.0.1:8444;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1305,12 +1377,12 @@ server {
         proxy_redirect / /desktop/;
     }
 
-    # Global WebSocket & Asset Handler for KasmVNC
+    # KasmVNC Assets & WebSockets
     location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
         proxy_pass https://127.0.0.1:8444;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host 127.0.0.1:8444;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1322,27 +1394,29 @@ server {
         proxy_buffering off;
     }
 
-    # PulseAudio WebSocket Bridge
-    location /audio {
+    # PulseAudio WebSocket Stream
+    location ^~ /audio {
         proxy_pass http://127.0.0.1:6081/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
     }
 
-    location /files/ {
+    # Dufs Files
+    location ^~ /files/ {
         proxy_pass http://127.0.0.1:8088/;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        client_max_body_size 0;
     }
 
-    # Aria2 JSON-RPC WebSocket & HTTP Proxy
-    location /jsonrpc {
+    # Aria2 JSON-RPC
+    location ^~ /jsonrpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1352,7 +1426,7 @@ server {
         proxy_send_timeout 3600s;
     }
 
-    location /rpc {
+    location ^~ /rpc {
         proxy_pass http://127.0.0.1:6800/jsonrpc;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1360,7 +1434,8 @@ server {
         proxy_set_header Host 127.0.0.1:6800;
     }
 
-    location /ariang/ {
+    # AriaNg Web Application
+    location ^~ /ariang/ {
         alias /var/www/html/ariang/;
         try_files \$uri \$uri/ /ariang/index.html;
     }
@@ -1370,8 +1445,21 @@ NGINX_EOF
 rm -f /etc/nginx/sites-enabled/*
 ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
 
-# 20. Enable and Restart All Services
-echo "[+] Starting and enabling all system services..."
+# ------------------------------------------------------------------------------
+# 21. UpCloud Firewall Rules (UFW)
+# ------------------------------------------------------------------------------
+echo "[+] Ensuring firewall rules for essential ports (22, 80, 443, 8443)..."
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow 22/tcp comment 'SSH' || true
+    ufw allow 80/tcp comment 'Nginx HTTP' || true
+    ufw allow 443/tcp comment 'Nginx HTTPS' || true
+    ufw allow 8443/tcp comment 'Nginx Alt HTTPS' || true
+fi
+
+# ------------------------------------------------------------------------------
+# 22. Enable and Start All System Services
+# ------------------------------------------------------------------------------
+echo "[+] Reloading systemd and restarting all services..."
 systemctl daemon-reload
 systemctl restart pulseaudio
 sleep 1
@@ -1385,7 +1473,9 @@ systemctl restart nginx
 
 systemctl enable pulseaudio audio-streamer kasmvnc nginx dufs aria2 2>/dev/null || true
 
-# 21. Port Health & Verification
+# ------------------------------------------------------------------------------
+# 23. System Verification and Diagnostics
+# ------------------------------------------------------------------------------
 echo "===================================================================="
 echo "                   System Health Verification                       "
 echo "===================================================================="
@@ -1394,7 +1484,7 @@ sleep 2
 check_port() {
     local port=$1
     local name=$2
-    if netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+    if ss -tuln 2>/dev/null | grep -q ":${port} " || netstat -tuln 2>/dev/null | grep -q ":${port} "; then
         echo -e "  [\033[0;32mOK\033[0m] Port ${port} (${name}) is active"
     else
         echo -e "  [\033[0;31mFAIL\033[0m] Port ${port} (${name}) is NOT listening"
@@ -1420,7 +1510,7 @@ else
 fi
 
 echo "--------------------------------------------------------------------"
-if netstat -tuln | grep -q ":8444 "; then
+if ss -tuln 2>/dev/null | grep -q ":8444 " || netstat -tuln 2>/dev/null | grep -q ":8444 "; then
     echo -e "\033[0;32m>>> SUCCESS: KasmVNC 60 FPS Workstation is running cleanly! <<<\033[0m"
 else
     echo -e "\033[0;31m>>> WARNING: KasmVNC did not bind to 8444. Checking log... <<<\033[0m"
@@ -1433,6 +1523,7 @@ echo "===================================================================="
 echo "  Access Portal    : https://${SERVER_IP}/"
 echo "  Direct Desktop   : https://${SERVER_IP}/desktop/?autoconnect=true"
 echo "  AriaNg Downloader: https://${SERVER_IP}/ariang/"
+echo "  File Explorer    : https://${SERVER_IP}/files/"
 echo "  VNC Username     : root"
 echo "  VNC Password     : ${VNC_PASS}"
 echo "===================================================================="
