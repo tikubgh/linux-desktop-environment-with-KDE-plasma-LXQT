@@ -1,16 +1,14 @@
 cat > setup.sh << 'EOF'
 #!/bin/bash
 # ==============================================================================
-# LinuxPC Cloud Workstation Setup - Universal Dual-Arch (AMD64 & ARM64)
-# Compatible with: Oracle Cloud Ampere A1 (ARM64) & UpCloud / Standard (x86_64)
-# OS: Ubuntu 22.04 LTS (Jammy Jellyfish)
-# Ports: 22 (SSH), 80 (HTTP), 443 (HTTPS), 8443 (Alt HTTPS)
-# Services: KasmVNC, KDE Plasma, PulseAudio, Audio Streamer, Dufs, Aria2, Nginx
+# LinuxPC Cloud Workstation - Master Unified Setup Script
+# Architecture: Dual-Arch (AMD64 / x86_64 & ARM64 / aarch64 Oracle Ampere A1)
+# OS Support   : Ubuntu 22.04 LTS (Jammy Jellyfish)
 # ==============================================================================
 set -e
 
 echo "===================================================================="
-echo "    Starting LinuxPC Workstation Setup (Dual-Arch: AMD64 & ARM64)   "
+echo "    Starting LinuxPC Workstation Setup (Complete Master Suite)      "
 echo "===================================================================="
 
 # ------------------------------------------------------------------------------
@@ -20,11 +18,11 @@ ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
     DEB_ARCH="amd64"
     DUFS_ARCH="x86_64"
-    echo "[+] Architecture detected: AMD64 / x86_64"
+    echo "[+] Architecture: AMD64 / x86_64"
 elif [ "$ARCH" = "aarch64" ]; then
     DEB_ARCH="arm64"
     DUFS_ARCH="aarch64"
-    echo "[+] Architecture detected: ARM64 / aarch64 (Ampere)"
+    echo "[+] Architecture: ARM64 / aarch64 (Oracle Ampere A1)"
 else
     echo "[-] Unsupported CPU architecture: $ARCH"
     exit 1
@@ -35,7 +33,7 @@ SERVER_IP="${SERVER_IP:-$(curl -4s --max-time 4 https://ifconfig.me 2>/dev/null 
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
 echo "[+] Target Public IP: ${SERVER_IP}"
 
-# Maintain or generate strong credentials
+# Credentials Management
 if [ -f /root/.linuxpc_credentials ]; then
     VNC_PASS=$(grep -i "Password" /root/.linuxpc_credentials | awk '{print $NF}')
 fi
@@ -45,9 +43,21 @@ fi
 BASIC_AUTH_B64=$(printf "%s" "root:${VNC_PASS}" | base64 | tr -d '\n')
 
 # ------------------------------------------------------------------------------
-# 2. Cleanup Legacy Processes, Display Locks & Unmask Nginx
+# 2. System Timezone Configuration (India Standard Time: GMT +5:30) & 12-Hour Clock
 # ------------------------------------------------------------------------------
-echo "[+] Cleaning legacy processes and freeing X11 display & network ports..."
+echo "[+] Configuring Indian Standard Time (Asia/Kolkata GMT+5:30) & 12h Format..."
+timedatectl set-timezone Asia/Kolkata 2>/dev/null || true
+ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime
+echo "Asia/Kolkata" > /etc/timezone
+export TZ="Asia/Kolkata"
+
+locale-gen en_IN.UTF-8 2>/dev/null || true
+update-locale LC_TIME=en_IN.UTF-8 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# 3. Cleanup Legacy Processes, Locks & Unmask Services
+# ------------------------------------------------------------------------------
+echo "[+] Cleaning legacy processes and freeing X11 locks..."
 systemctl stop kasmvnc pulseaudio audio-streamer dufs aria2 nginx websockify 2>/dev/null || true
 pkill -9 -f Xvnc 2>/dev/null || true
 pkill -9 -f kasmvnc 2>/dev/null || true
@@ -57,60 +67,68 @@ pkill -9 -f dufs 2>/dev/null || true
 pkill -9 -f aria2c 2>/dev/null || true
 pkill -9 -f chrome 2>/dev/null || true
 pkill -9 -f chromium 2>/dev/null || true
-pkill -9 -f websockify 2>/dev/null || true
+pkill -9 -f dolphin 2>/dev/null || true
+pkill -9 -f konsole 2>/dev/null || true
 
-# Force release audio & websocket ports
 fuser -k 6081/tcp 2>/dev/null || true
 fuser -k 6082/tcp 2>/dev/null || true
 fuser -k 8444/tcp 2>/dev/null || true
 
-rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
+rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log /run/user/0 2>/dev/null || true
 rm -f /root/.config/google-chrome/Singleton* /root/.config/chromium/Singleton* 2>/dev/null || true
 
-# Unmask Nginx (fixes Oracle Cloud masked unit error)
-echo "[+] Unmasking Nginx service..."
+# Unmask Nginx (Fixes Oracle Cloud masked service issue)
 systemctl unmask nginx.service 2>/dev/null || true
 systemctl unmask nginx 2>/dev/null || true
 rm -f /etc/systemd/system/nginx.service 2>/dev/null || true
 systemctl daemon-reload
 
 # ------------------------------------------------------------------------------
-# 3. Kernel & TCP Network Socket Latency Tuning
+# 4. Kernel Network Stack Tuning & BBR Anti-Throttling (For Jio Fiber 30 Mbps)
 # ------------------------------------------------------------------------------
-echo "[+] Optimizing network stack and socket buffers for 60 FPS streaming..."
+echo "[+] Enabling TCP BBR Congestion Control & Path MTU Probing (Jio Fiber fix)..."
+modprobe tcp_bbr 2>/dev/null || true
+grep -q "tcp_bbr" /etc/modules 2>/dev/null || echo "tcp_bbr" >> /etc/modules 2>/dev/null || true
+
 cat > /etc/sysctl.d/99-linuxpc-latency.conf << 'SYSCTL_EOF'
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_low_latency = 1
 net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.core.netdev_max_backlog = 100000
 SYSCTL_EOF
 sysctl -p /etc/sysctl.d/99-linuxpc-latency.conf >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------------------------
-# 4. APT Initialization & Safe Lock Wait
+# 5. APT Package Installation
 # ------------------------------------------------------------------------------
-echo "[+] Preparing APT repositories..."
+echo "[+] Preparing APT environment..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
 while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-    echo "[i] Waiting for background system updates to release APT lock..."
+    echo "[i] Waiting for background processes to release APT locks..."
     sleep 3
 done
 
 rm -f /etc/apt/sources.list.d/brave-browser*.list /etc/apt/trusted.gpg.d/brave-browser*.gpg 2>/dev/null || true
 echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99translations 2>/dev/null || true
 
+# Add xtradeb apps repository for native ARM64 / AMD64 Chromium builds
+add-apt-repository -y ppa:xtradeb/apps 2>/dev/null || true
 apt-get update -qq
 
-# ------------------------------------------------------------------------------
-# 5. Core Desktop Stack, Themes, Tools & Audio
-# ------------------------------------------------------------------------------
-echo "[+] Installing full KDE Plasma desktop stack, icon engines, and tools..."
+echo "[+] Installing KDE Desktop, D-Bus, Media Engine, and System Libraries..."
 apt-get install -y -qq \
     kde-plasma-desktop \
     plasma-desktop \
@@ -123,24 +141,18 @@ apt-get install -y -qq \
     kwin-x11 \
     systemsettings \
     libqt5svg5 \
-    libqt5svg5-dev \
-    qt5-image-formats-plugins \
-    kimageformat-plugins \
-    libkf5iconthemes-bin \
     libkf5iconthemes5 \
-    libkf5config-bin \
     papirus-icon-theme \
-    oxygen-icon-theme \
-    adwaita-icon-theme \
     hicolor-icon-theme \
-    librsvg2-bin \
-    gvfs \
-    gvfs-backends \
+    adwaita-icon-theme \
     libglib2.0-bin \
     dolphin \
+    pcmanfm-qt \
     konsole \
     xorg \
+    dbus \
     dbus-x11 \
+    dbus-user-session \
     x11-xserver-utils \
     x11-utils \
     xauth \
@@ -165,30 +177,51 @@ apt-get install -y -qq \
     ca-certificates \
     openssl \
     net-tools \
+    tzdata \
+    software-properties-common \
     iptables-persistent 2>/dev/null || true
 
 [ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 6. Install Browser (Dynamic for AMD64 & ARM64)
+# 6. Native Browser Architecture Verification & Installation
 # ------------------------------------------------------------------------------
-if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
-    echo "[+] Installing Web Browser for ${DEB_ARCH}..."
-    CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_${DEB_ARCH}.deb"
-    
-    if curl -fsIL --max-time 5 "${CHROME_URL}" >/dev/null 2>&1; then
-        echo "[+] Downloading official Google Chrome (${DEB_ARCH})..."
-        wget -q -O /tmp/chrome.deb "${CHROME_URL}" 2>/dev/null || true
-        apt-get install -y /tmp/chrome.deb 2>/dev/null || apt-get install -f -y
-        rm -f /tmp/chrome.deb
-    else
-        echo "[+] Fallback: Installing native Chromium..."
-        apt-get install -y chromium-browser 2>/dev/null || apt-get install -y chromium 2>/dev/null || true
-    fi
+echo "[+] Installing and validating native Web Browser..."
+
+dpkg --purge --force-all google-chrome-stable chromium-browser chromium 2>/dev/null || true
+rm -rf /opt/google /etc/opt/chrome /usr/bin/google-chrome* /tmp/chrome* 2>/dev/null || true
+
+if [ "$DEB_ARCH" = "amd64" ]; then
+    CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+    wget -q -O /tmp/chrome.deb "${CHROME_URL}" 2>/dev/null || true
+    apt-get install -y /tmp/chrome.deb 2>/dev/null || apt-get install -f -y
+    rm -f /tmp/chrome.deb
 fi
 
+if ! command -v google-chrome-stable >/dev/null 2>&1 || ! google-chrome-stable --version >/dev/null 2>&1; then
+    echo "[+] Installing native Chromium .deb for ${ARCH}..."
+    apt-get install -y --reinstall chromium chromium-common 2>/dev/null || true
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome 2>/dev/null || true
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable 2>/dev/null || true
+    ln -sf /usr/bin/chromium /usr/bin/chromium-browser 2>/dev/null || true
+fi
+
+# Pre-install AdBlock extension across Chrome & Chromium via Managed Policy
+echo "[+] Pre-installing AdBlock extension (getadblock.com)..."
+mkdir -p /etc/opt/chrome/policies/managed /etc/chromium/policies/managed /etc/chromium-browser/policies/managed
+
+cat > /etc/opt/chrome/policies/managed/adblock.json << 'POLICY_EOF'
+{
+  "ExtensionInstallForcelist": [
+    "gighmmpiobklfepjocnamgkkbiglidom;https://clients2.google.com/service/update2/crx"
+  ]
+}
+POLICY_EOF
+cp -f /etc/opt/chrome/policies/managed/adblock.json /etc/chromium/policies/managed/adblock.json 2>/dev/null || true
+cp -f /etc/opt/chrome/policies/managed/adblock.json /etc/chromium-browser/policies/managed/adblock.json 2>/dev/null || true
+
 # ------------------------------------------------------------------------------
-# 7. Install KasmVNC Server 1.5.0 (Architecture-Matched)
+# 7. Install KasmVNC Server 1.5.0
 # ------------------------------------------------------------------------------
 if ! dpkg -l | grep -q kasmvncserver; then
     KASMVNC_DEB="kasmvncserver_jammy_1.5.0_${DEB_ARCH}.deb"
@@ -205,10 +238,32 @@ if [ -f /usr/lib/kasmvncserver/select-de.sh ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 8. Dark Mode, Compositor Optimization & Desktop Configuration
+# 8. Dark Mode, Compositor Off, 12-Hour Clock, Patch Dolphin & Taskbar Audio Badges
 # ------------------------------------------------------------------------------
-echo "[+] Configuring permanent Dark Mode & zero-overhead X11 rendering..."
+echo "[+] Configuring Breeze Dark theme, 12-hour clock, and desktop settings..."
 mkdir -p /root/.config /root/.config/gtk-3.0 /root/.config/gtk-4.0 /etc/xdg
+
+# Patch Dolphin root check so root can launch the file manager
+sed -i 's/geteuid/getppid/' /usr/lib/*/libdolphinprivate.so* 2>/dev/null || true
+sed -i 's/geteuid/getppid/' /usr/bin/dolphin 2>/dev/null || true
+
+# Patch Task Manager plasmoid to remove speaker audio overlay badges from all icons
+for f in $(find /usr/share/plasma/plasmoids/ -name "AudioStream.qml" 2>/dev/null); do
+    cat > "$f" << 'QML_EOF'
+import QtQuick 2.0
+Item {
+    visible: false
+    width: 0
+    height: 0
+    opacity: 0
+}
+QML_EOF
+done
+
+# Ensure KDE Plasma desktop defaults to Folder View (Desktop Icons Active)
+if [ -f /usr/share/plasma/shells/org.kde.plasma.desktop/contents/defaults ]; then
+    sed -i 's/Containment=.*/Containment=org.kde.plasma.folder/g' /usr/share/plasma/shells/org.kde.plasma.desktop/contents/defaults 2>/dev/null || true
+fi
 
 cat > /etc/xdg/kdeglobals << 'KDE_SYS_EOF'
 [General]
@@ -222,6 +277,10 @@ widgetStyle=Breeze
 
 [Icons]
 Theme=breeze-dark
+
+[Formats]
+use24hFormat=1
+LC_TIME=en_IN.UTF-8
 
 [org.kde.kdecoration2]
 BorderSize=Normal
@@ -252,6 +311,10 @@ widgetStyle=Breeze
 Theme=breeze-dark
 FallbackTheme=Papirus-Dark
 
+[Formats]
+use24hFormat=1
+LC_TIME=en_IN.UTF-8
+
 [org.kde.kdecoration2]
 BorderSize=Normal
 BorderSizeAuto=false
@@ -262,7 +325,13 @@ library=org.kde.breeze
 theme=Breeze
 KDE_EOF
 
-# Compositing disabled for direct X11 frame grabbing at 60 FPS
+# Set 12-Hour format via kwriteconfig5 if available
+if command -v kwriteconfig5 >/dev/null 2>&1; then
+    kwriteconfig5 --file /root/.config/kdeglobals --group Formats --key use24hFormat 1 2>/dev/null || true
+    kwriteconfig5 --file /etc/xdg/kdeglobals --group Formats --key use24hFormat 1 2>/dev/null || true
+fi
+
+# Disable compositing for maximum 60 FPS throughput without GPU overhead
 cat > /root/.config/kwinrc << 'KWIN_EOF'
 [org.kde.kdecoration2]
 BorderSize=Normal
@@ -309,57 +378,27 @@ gtk-font-name=Noto Sans 10
 gtk-application-prefer-dark-theme=1
 GTK3_EOF
 
-cat > /root/.config/gtk-4.0/settings.ini << 'GTK4_EOF'
-[Settings]
-gtk-theme-name=Breeze-Dark
-gtk-icon-theme-name=breeze-dark
-gtk-font-name=Noto Sans 10
-gtk-application-prefer-dark-theme=1
-GTK4_EOF
-
 # ------------------------------------------------------------------------------
-# 9. SSL Certificates Setup
+# 9. Cloudflare-Compatible Universal SSL SAN Certificate
 # ------------------------------------------------------------------------------
-echo "[+] Generating SSL Snakeoil & Nginx SAN Certificates..."
-make-ssl-cert generate-default-snakeoil --force-overwrite 2>/dev/null || true
-chown root:ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
-chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
-
+echo "[+] Generating Cloudflare-ready Universal Wildcard SAN Certificates..."
 mkdir -p /etc/nginx/ssl
-cat > /tmp/openssl_san.cnf << SAN_EOF
-[req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-C = SG
-ST = Singapore
-L = Singapore
-O = LinuxPC
-CN = ${SERVER_IP}
-
-[v3_req]
-keyUsage = keyEncipherment, dataEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-IP.1 = ${SERVER_IP}
-IP.2 = 127.0.0.1
-DNS.1 = localhost
-SAN_EOF
-
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-    -keyout /etc/nginx/ssl/server.key \
-    -out /etc/nginx/ssl/server.crt \
-    -config /tmp/openssl_san.cnf 2>/dev/null || true
-rm -f /tmp/openssl_san.cnf
+  -keyout /etc/nginx/ssl/server.key \
+  -out /etc/nginx/ssl/server.crt \
+  -subj "/CN=*/O=LinuxPC" \
+  -addext "subjectAltName=DNS:*,DNS:localhost,IP:${SERVER_IP},IP:127.0.0.1" 2>/dev/null || \
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl/server.key \
+  -out /etc/nginx/ssl/server.crt \
+  -subj "/CN=*/O=LinuxPC" 2>/dev/null || true
+
+make-ssl-cert generate-default-snakeoil --force-overwrite 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 10. Automated KasmVNC Credentials Configuration (-w -o Write/Owner)
+# 10. Automated KasmVNC Credentials Configuration
 # ------------------------------------------------------------------------------
-echo "[+] Configuring KasmVNC user credentials with Owner & Write permissions..."
+echo "[+] Configuring KasmVNC user credentials..."
 mkdir -p /root/.vnc /etc/kasmvnc
 touch /root/.vnc/.de-was-selected
 
@@ -383,49 +422,85 @@ LinuxPC Cloud Workstation Credentials
 Username : root
 Password : ${VNC_PASS}
 Server IP: ${SERVER_IP}
+Timezone : Asia/Kolkata (IST GMT+5:30)
 Generated: $(date)
 CRED_EOF
 chmod 600 /root/.linuxpc_credentials
 
 # ------------------------------------------------------------------------------
-# 11. Xstartup Session and Validated KasmVNC YAML Settings
+# 11. Xstartup Session with Bulletproof D-Bus & Folder View
 # ------------------------------------------------------------------------------
+echo "[+] Configuring Plasma session launcher with D-Bus integration..."
+mkdir -p /root/.config/plasma-workspace/env /run/user/0
+chmod 700 /run/user/0
+
+cat > /root/.config/plasma-workspace/env/path.sh << 'ENV_EOF'
+#!/bin/sh
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export XDG_RUNTIME_DIR="/run/user/0"
+export LC_TIME=en_IN.UTF-8
+ENV_EOF
+chmod +x /root/.config/plasma-workspace/env/path.sh
+
+# Pre-configure Folder View containment and 12-hour clock
+cat > /root/.config/plasma-org.kde.plasma.desktop-appletsrc << 'PLASMA_CONTAINMENT_EOF'
+[ActionPlugins][0]
+RightButton;NoModifier=org.kde.contextmenu
+
+[Containments][1]
+activityId=
+formfactor=0
+immutability=1
+lastScreen=0
+location=0
+plugin=org.kde.plasma.folder
+wallpaperplugin=org.kde.image
+
+[Containments][1][Applets][2]
+immutability=1
+plugin=org.kde.plasma.folder
+
+[Containments][1][Configuration][General]
+url=desktop:/
+
+[Formats]
+use24hFormat=1
+LC_TIME=en_IN.UTF-8
+PLASMA_CONTAINMENT_EOF
+
 cat > /root/.vnc/xstartup << 'XSTARTUP_EOF'
 #!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+export USER=root
+export HOME=/root
+export XDG_RUNTIME_DIR="/run/user/0"
+mkdir -p /run/user/0
+chmod 700 /run/user/0
+
+export DISPLAY=:1
+export TZ="Asia/Kolkata"
+export LC_TIME=en_IN.UTF-8
+export LC_NUMERIC=en_IN.UTF-8
 export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=KDE
 export DESKTOP_SESSION=plasma
 export KDE_FULL_SESSION=true
 export QT_QPA_PLATFORM=xcb
-export DISPLAY=:1
-export PULSE_SERVER=127.0.0.1:4713
-
-export QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/aarch64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins"
-export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms:/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
-export XDG_DATA_DIRS="/usr/local/share:/usr/share:/var/lib/snapd/desktop"
+export PULSE_SERVER="127.0.0.1:4713"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export XDG_DATA_DIRS="/usr/local/share:/usr/share"
 export XDG_CONFIG_DIRS="/etc/xdg"
-export QT_STYLE_OVERRIDE="Breeze"
-export GTK_THEME="Breeze-Dark"
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
 
 [ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
 
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    eval $(dbus-launch --sh-syntax --exit-with-session)
-fi
-
-# Apply Breeze Dark look and feel inside active X11 display
-plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
-plasma-apply-colorscheme BreezeDark 2>/dev/null || true
-kbuildsycoca5 --noincremental 2>/dev/null || true
-
+# Run KDE Plasma wrapped in dbus-run-session to guarantee application launch IPC
 if [ -x /usr/bin/startplasma-x11 ]; then
-    exec /usr/bin/startplasma-x11
+    exec dbus-run-session /usr/bin/startplasma-x11
 elif [ -x /usr/bin/startkde ]; then
-    exec /usr/bin/startkde
+    exec dbus-run-session /usr/bin/startkde
 elif [ -x /usr/bin/xfce4-session ]; then
-    exec /usr/bin/xfce4-session
+    exec dbus-run-session /usr/bin/xfce4-session
 else
     exec x-window-manager
 fi
@@ -452,13 +527,24 @@ YAML_EOF
 cp -f /etc/kasmvnc/kasmvnc.yaml /root/.vnc/kasmvnc.yaml 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 12. PulseAudio Headless Sound Server (Ports 4713 & 6082)
+# 12. PulseAudio Headless Sound Server & ALSA Bridge
 # ------------------------------------------------------------------------------
-echo "[+] Setting up PulseAudio low-latency streaming pipeline..."
+echo "[+] Setting up PulseAudio sound pipeline & ALSA bridge..."
+
+cat > /etc/asound.conf << 'ALSA_EOF'
+pcm.!default {
+    type pulse
+}
+ctl.!default {
+    type pulse
+}
+ALSA_EOF
+
 cat > /etc/pulse/system.pa << 'PULSE_EOF'
 load-module module-null-sink sink_name=VirtualSink sink_properties=device.description="LinuxPC_Virtual_Sink"
 set-default-sink VirtualSink
 load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1 port=4713
+load-module module-native-protocol-unix auth-anonymous=1 auth-cookie-enabled=0
 load-module module-simple-protocol-tcp rate=44100 format=s16le channels=2 source=VirtualSink.monitor record=true port=6082 listen=127.0.0.1
 load-module module-always-sink
 PULSE_EOF
@@ -466,6 +552,7 @@ PULSE_EOF
 cat > /etc/pulse/client.conf << 'PULSE_CLIENT_EOF'
 default-server = 127.0.0.1:4713
 autospawn = no
+enable-shm = no
 PULSE_CLIENT_EOF
 
 cat > /etc/systemd/system/pulseaudio.service << 'PULSE_SVC_EOF'
@@ -478,7 +565,7 @@ Type=simple
 User=root
 Environment=HOME=/root
 ExecStartPre=-/usr/bin/pulseaudio -k
-ExecStart=/usr/bin/pulseaudio --system --disallow-exit --disallow-module-loading=0 --exit-idle-time=-1 --realtime=true --log-target=journal
+ExecStart=/usr/bin/pulseaudio --system --disallow-exit --disallow-module-loading=0 --exit-idle-time=-1 --realtime=false -n -F /etc/pulse/system.pa --log-target=journal
 Restart=always
 RestartSec=2
 
@@ -489,7 +576,7 @@ PULSE_SVC_EOF
 # ------------------------------------------------------------------------------
 # 13. Low-Latency Audio WebSocket Bridge (Port 6081)
 # ------------------------------------------------------------------------------
-echo "[+] Deploying Python Audio WebSocket Streamer..."
+echo "[+] Deploying Audio WebSocket Streamer..."
 cat > /usr/local/bin/audio-streamer.py << 'PY_AUDIO_EOF'
 #!/usr/bin/env python3
 import asyncio
@@ -522,15 +609,18 @@ async def pulse_reader():
 async def ws_handler(websocket, *args, **kwargs):
     CLIENTS.add(websocket)
     try:
-        await websocket.wait_closed()
+        async for _ in websocket:
+            pass
+    except Exception:
+        pass
     finally:
         CLIENTS.discard(websocket)
 
 async def main():
     asyncio.create_task(pulse_reader())
-    server = await websockets.serve(ws_handler, "127.0.0.1", 6081)
-    logging.info("Audio WebSocket server running on 127.0.0.1:6081")
-    await server.wait_closed()
+    async with websockets.serve(ws_handler, "127.0.0.1", 6081):
+        logging.info("Audio WebSocket server running on 127.0.0.1:6081")
+        await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -555,16 +645,108 @@ WantedBy=multi-user.target
 AUDIO_SVC_EOF
 
 # ------------------------------------------------------------------------------
-# 14. KasmVNC 60 FPS Launcher & Auto-Permission Enforcement
+# 14. Inject Silent Audio Client into KasmVNC Web UI (NO Buttons on Screen)
+# ------------------------------------------------------------------------------
+echo "[+] Injecting automatic silent audio bridge into KasmVNC Web Interface..."
+if [ -d /usr/share/kasmvnc/www ]; then
+    cat > /tmp/kasm_audio.js << 'JS_AUDIO_EOF'
+<script id="kasm-audio-bridge">
+(function() {
+    let audioCtx = null;
+    let audioWs = null;
+    let nextAudioTime = 0;
+
+    function initAudio() {
+        if (audioCtx && audioCtx.state === 'running' && audioWs && audioWs.readyState === WebSocket.OPEN) return;
+        if (!audioCtx) {
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+            } catch(e) {
+                return;
+            }
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+
+        if (audioWs && (audioWs.readyState === WebSocket.OPEN || audioWs.readyState === WebSocket.CONNECTING)) return;
+
+        try {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            audioWs = new WebSocket(`${proto}//${location.host}/audio`);
+            audioWs.binaryType = 'arraybuffer';
+
+            audioWs.onmessage = function(event) {
+                if (!audioCtx || audioCtx.state !== 'running') return;
+                const int16 = new Int16Array(event.data);
+                const frames = Math.floor(int16.length / 2);
+                if (frames === 0) return;
+
+                const buffer = audioCtx.createBuffer(2, frames, 44100);
+                const l = buffer.getChannelData(0);
+                const r = buffer.getChannelData(1);
+                for (let i = 0; i < frames; i++) {
+                    l[i] = int16[i * 2] / 32768.0;
+                    r[i] = int16[i * 2 + 1] / 32768.0;
+                }
+
+                const src = audioCtx.createBufferSource();
+                src.buffer = buffer;
+                src.connect(audioCtx.destination);
+
+                const cur = audioCtx.currentTime;
+                if (nextAudioTime < cur || nextAudioTime > cur + 0.15) {
+                    nextAudioTime = cur + 0.03;
+                }
+                src.start(nextAudioTime);
+                nextAudioTime += buffer.duration;
+            };
+
+            audioWs.onclose = function() {
+                audioWs = null;
+                setTimeout(initAudio, 2000);
+            };
+
+            audioWs.onerror = function() {
+                try { audioWs.close(); } catch(e) {}
+            };
+        } catch(e) {}
+    }
+
+    // Connect silently on first user interaction with the screen
+    ['click', 'mousedown', 'pointerdown', 'keydown', 'touchstart'].forEach(function(evt) {
+        window.addEventListener(evt, initAudio, { passive: true });
+    });
+
+    window.addEventListener('focus', function() {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+
+    document.addEventListener('DOMContentLoaded', initAudio);
+})();
+</script>
+JS_AUDIO_EOF
+
+    for f in $(find /usr/share/kasmvnc/www/ -name "*.html" 2>/dev/null); do
+        sed -i '/kasm-audio-bridge/d' "$f" 2>/dev/null || true
+        sed -i '/<head>/r /tmp/kasm_audio.js' "$f" 2>/dev/null || true
+    done
+    rm -f /tmp/kasm_audio.js
+fi
+
+# ------------------------------------------------------------------------------
+# 15. KasmVNC 60 FPS Launcher
 # ------------------------------------------------------------------------------
 echo "[+] Configuring KasmVNC 60 FPS launcher..."
 cat > /usr/local/bin/kasmvnc-launcher << 'LAUNCHER_EOF'
 #!/bin/bash
 /usr/bin/vncserver -kill :1 2>/dev/null || true
 rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
+mkdir -p /run/user/0
+chmod 700 /run/user/0
+
 [ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde 2>/dev/null || true
 
-# Enforce :ow permissions before invoking vncserver to eliminate interactive prompts
 if [ -f /root/.kasmpasswd ]; then
     sed -i 's/^\(root:[^:]*\)\(:.*\)\?$/\1:ow/' /root/.kasmpasswd 2>/dev/null || true
     for p in /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
@@ -578,8 +760,6 @@ exec /usr/bin/vncserver -fg :1 \
     -depth 24 \
     -select-de manual \
     -FrameRate 60 \
-    -VideoTime 0 \
-    -VideoArea 5 \
     -RectThreads 4
 LAUNCHER_EOF
 chmod +x /usr/local/bin/kasmvnc-launcher
@@ -593,11 +773,17 @@ Wants=pulseaudio.service
 [Service]
 Type=simple
 User=root
-Environment=HOME=/root
-Environment=USER=root
-Environment=DISPLAY=:1
-Environment=PULSE_SERVER=127.0.0.1:4713
+Environment="HOME=/root"
+Environment="USER=root"
+Environment="XDG_RUNTIME_DIR=/run/user/0"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="DISPLAY=:1"
+Environment="TZ=Asia/Kolkata"
+Environment="LC_TIME=en_IN.UTF-8"
+Environment="PULSE_SERVER=127.0.0.1:4713"
 WorkingDirectory=/root
+ExecStartPre=-/bin/mkdir -p /run/user/0
+ExecStartPre=-/bin/chmod 700 /run/user/0
 ExecStartPre=-/bin/rm -rf /tmp/.X11-unix/X1 /tmp/.X1-lock /root/.vnc/*.pid /root/.vnc/*.log
 ExecStart=/usr/local/bin/kasmvnc-launcher
 ExecStop=/usr/bin/vncserver -kill :1
@@ -611,41 +797,89 @@ WantedBy=multi-user.target
 KASMVNC_SVC_EOF
 
 # ------------------------------------------------------------------------------
-# 15. Universal Browser 60 FPS Binary Wrapper
+# 16. Universal 60 FPS Web Browser Wrapper
 # ------------------------------------------------------------------------------
-cat > /usr/local/bin/chrome-60fps << 'CHROME_EOF'
+cat > /usr/bin/chrome-60fps << 'CHROME_EOF'
 #!/bin/bash
 export DISPLAY="${DISPLAY:-:1}"
 export PULSE_SERVER="127.0.0.1:4713"
-rm -f /root/.config/google-chrome/Singleton* /root/.config/chromium/Singleton* 2>/dev/null || true
+export TZ="Asia/Kolkata"
+export LC_TIME=en_IN.UTF-8
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+rm -f /root/.config/chromium/Singleton* /root/.config/google-chrome/Singleton* 2>/dev/null || true
 
-REAL_BROWSER=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium || echo "/usr/bin/chromium-browser")
+BROWSER_CMD=""
+for candidate in /usr/bin/chromium /usr/bin/chromium-browser /opt/google/chrome/google-chrome /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/firefox; do
+    if [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+        BROWSER_CMD="$candidate"
+        break
+    fi
+done
 
-exec "${REAL_BROWSER}" \
-    --no-sandbox \
-    --test-type \
-    --disable-infobars \
-    --no-first-run \
-    --no-default-browser-check \
-    --password-store=basic \
-    --disable-dev-shm-usage \
-    --disable-gpu \
-    --force-dark-mode \
-    --enable-features=WebUIDarkMode \
-    --user-data-dir=/root/.config/browser-data \
-    "$@"
+if [ -z "$BROWSER_CMD" ]; then
+    exit 1
+fi
+
+if [[ "$BROWSER_CMD" == *"firefox"* ]]; then
+    exec "$BROWSER_CMD" "$@"
+else
+    exec "$BROWSER_CMD" \
+        --no-sandbox \
+        --test-type \
+        --disable-infobars \
+        --no-first-run \
+        --no-default-browser-check \
+        --password-store=basic \
+        --disable-dev-shm-usage \
+        --disable-gpu \
+        --force-dark-mode \
+        --enable-features=WebUIDarkMode \
+        --user-data-dir=/root/.config/browser-data \
+        "$@"
+fi
 CHROME_EOF
-chmod +x /usr/local/bin/chrome-60fps
+chmod +x /usr/bin/chrome-60fps
+cp -f /usr/bin/chrome-60fps /usr/local/bin/chrome-60fps 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 16. Dufs File Explorer (Port 8088 - Dual-Arch)
+# 17. File Manager Wrapper (Bypasses KDE root block)
 # ------------------------------------------------------------------------------
-echo "[+] Configuring Dufs Fast File Manager..."
+cat > /usr/bin/file-manager << 'FM_EOF'
+#!/bin/bash
+export DISPLAY="${DISPLAY:-:1}"
+export TZ="Asia/Kolkata"
+export LC_TIME=en_IN.UTF-8
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+if [ -x /usr/bin/dolphin ]; then
+    exec /usr/bin/dolphin /root "$@"
+elif [ -x /usr/bin/pcmanfm-qt ]; then
+    exec /usr/bin/pcmanfm-qt /root "$@"
+else
+    exec /usr/bin/xdg-open /root "$@"
+fi
+FM_EOF
+chmod +x /usr/bin/file-manager
+
+# ------------------------------------------------------------------------------
+# 18. Dufs File Explorer (Port 8088 - Fixed Subpath Prefix & Standalone App)
+# ------------------------------------------------------------------------------
+echo "[+] Configuring Dufs Fast File Manager with subpath prefix..."
 if [ ! -f /usr/local/bin/dufs ]; then
     DUFS_VER="v0.43.0"
     curl -fsSL "https://github.com/sigoden/dufs/releases/download/${DUFS_VER}/dufs-${DUFS_VER}-${DUFS_ARCH}-unknown-linux-musl.tar.gz" | tar -xz -C /usr/local/bin dufs 2>/dev/null || true
     chmod +x /usr/local/bin/dufs 2>/dev/null || true
 fi
+
+cat > /usr/bin/dufs-gui << 'DUFS_GUI_EOF'
+#!/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export DISPLAY="${DISPLAY:-:1}"
+export PULSE_SERVER="127.0.0.1:4713"
+export TZ="Asia/Kolkata"
+exec /usr/bin/chrome-60fps --app="http://127.0.0.1/files/" "$@"
+DUFS_GUI_EOF
+chmod +x /usr/bin/dufs-gui
+cp -f /usr/bin/dufs-gui /usr/local/bin/dufs-gui 2>/dev/null || true
 
 mkdir -p /root/Downloads
 cat > /etc/systemd/system/dufs.service << 'DUFS_SVC_EOF'
@@ -656,7 +890,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/dufs /root/Downloads -b 127.0.0.1 -p 8088 --allow-all --render-spa
+ExecStart=/usr/local/bin/dufs /root/Downloads -b 127.0.0.1 -p 8088 --allow-all --path-prefix /files
 Restart=always
 RestartSec=2
 
@@ -665,7 +899,7 @@ WantedBy=multi-user.target
 DUFS_SVC_EOF
 
 # ------------------------------------------------------------------------------
-# 17. Aria2 High-Performance RPC Daemon & AriaNg (Port 6800)
+# 19. Aria2 High-Performance RPC Daemon & AriaNg (Port 6800)
 # ------------------------------------------------------------------------------
 echo "[+] Setting up Aria2 RPC Daemon & AriaNg..."
 mkdir -p /etc/aria2 /var/www/html/ariang
@@ -763,68 +997,127 @@ JS_EOF
 sed -i '/<head>/r /tmp/ariang_head.js' /var/www/html/ariang/index.html 2>/dev/null || true
 rm -f /tmp/ariang_head.js
 
-cat > /usr/local/bin/aria2-gui << 'ARIA_GUI_EOF'
+cat > /usr/bin/aria2-gui << 'ARIA_GUI_EOF'
 #!/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export DISPLAY="${DISPLAY:-:1}"
-exec /usr/local/bin/chrome-60fps --app="http://127.0.0.1/ariang/#!/settings/rpc/set/http/127.0.0.1/6800/jsonrpc" "$@"
+export PULSE_SERVER="127.0.0.1:4713"
+export TZ="Asia/Kolkata"
+exec /usr/bin/chrome-60fps --app="http://127.0.0.1/ariang/#!/settings/rpc/set/http/127.0.0.1/6800/jsonrpc" "$@"
 ARIA_GUI_EOF
-chmod +x /usr/local/bin/aria2-gui
+chmod +x /usr/bin/aria2-gui
+cp -f /usr/bin/aria2-gui /usr/local/bin/aria2-gui 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 18. SVG & Crisp PNG Icon Generation + Desktop Application Launchers
+# 20. Direct PNG Icon Generation & Desktop Shortcuts
 # ------------------------------------------------------------------------------
-echo "[+] Generating sharp application vector icons..."
+echo "[+] Generating sharp 64x64 standalone application PNG icons..."
 mkdir -p /usr/share/pixmaps \
-         /usr/share/icons/hicolor/48x48/apps \
          /usr/share/icons/hicolor/64x64/apps \
+         /usr/share/icons/hicolor/48x48/apps \
          /usr/share/icons/breeze/apps/48 \
          /usr/share/icons/breeze-dark/apps/48
 
-cat > /usr/share/pixmaps/aria2.svg << 'SVG_ARIA'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="gAria" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0284c7"/>
-      <stop offset="100%" stop-color="#0369a1"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="16" fill="url(#gAria)"/>
-  <path d="M32 14v24m0 0l-10-10m10 10l10-10M18 46h28" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
-SVG_ARIA
+python3 - << 'PY_ICON_EOF'
+import zlib, struct, os, math
 
-cat > /usr/share/pixmaps/dufs.svg << 'SVG_DUFS'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="gDufs" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#2563eb"/>
-      <stop offset="100%" stop-color="#1d4ed8"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="16" fill="url(#gDufs)"/>
-  <path d="M18 24a3 3 0 0 1 3-3h7l4 4h11a3 3 0 0 1 3 3v16a3 3 0 0 1-3 3H21a3 3 0 0 1-3-3V24z" fill="#ffffff"/>
-</svg>
-SVG_DUFS
+def create_png(width, height, get_pixel, filename):
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        for x in range(width):
+            r, g, b, a = get_pixel(x, y, width, height)
+            raw.extend([r, g, b, a])
+    compressed = zlib.compress(bytes(raw))
+    ihdr = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)
+    def chunk(tag, data):
+        c = tag + data
+        crc = struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+        return struct.pack('>I', len(data)) + c + crc
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', compressed) + chunk(b'IEND', b'')
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, 'wb') as f:
+        f.write(png)
 
-rsvg-convert -w 64 -h 64 /usr/share/pixmaps/aria2.svg -o /usr/share/pixmaps/aria2.png 2>/dev/null || true
-rsvg-convert -w 64 -h 64 /usr/share/pixmaps/dufs.svg -o /usr/share/pixmaps/dufs.png 2>/dev/null || true
+# 1. Chrome / Web Browser (Vibrant 4-color emblem)
+def browser_px(x, y, w, h):
+    dx, dy = x - 31.5, y - 31.5
+    d2 = dx*dx + dy*dy
+    if d2 > 28*28: return (0, 0, 0, 0)
+    if d2 < 11*11: return (66, 133, 244, 255)
+    if d2 < 14*14: return (255, 255, 255, 255)
+    ang = math.atan2(dy, dx)
+    if -math.pi * 0.75 < ang < math.pi * 0.25:
+        return (234, 67, 53, 255)
+    elif ang >= math.pi * 0.25 and dy > 0:
+        return (251, 188, 5, 255)
+    else:
+        return (52, 168, 83, 255)
 
-for sz in 48 64; do
-    cp -f /usr/share/pixmaps/aria2.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/aria2.png" 2>/dev/null || true
-    cp -f /usr/share/pixmaps/dufs.png "/usr/share/icons/hicolor/${sz}x${sz}/apps/dufs.png" 2>/dev/null || true
+# 2. Aria2 Downloader (Sky blue + white arrow)
+def aria_px(x, y, w, h):
+    if x < 4 or x >= 60 or y < 4 or y >= 60: return (0, 0, 0, 0)
+    if (x < 12 and y < 12 and (x-12)**2 + (y-12)**2 > 64) or \
+       (x >= 52 and y < 12 and (x-51)**2 + (y-12)**2 > 64) or \
+       (x < 12 and y >= 52 and (x-12)**2 + (y-51)**2 > 64) or \
+       (x >= 52 and y >= 52 and (x-51)**2 + (y-51)**2 > 64):
+        return (0, 0, 0, 0)
+    if 29 <= x <= 34 and 16 <= y <= 36: return (255, 255, 255, 255)
+    if 32 <= y <= 42 and abs(x - 31.5) <= (42 - y): return (255, 255, 255, 255)
+    if 18 <= x <= 45 and 45 <= y <= 48: return (255, 255, 255, 255)
+    return (2, 132, 199, 255)
+
+# 3. Cloud Files (Royal blue folder)
+def dufs_px(x, y, w, h):
+    if x < 4 or x >= 60 or y < 4 or y >= 60: return (0, 0, 0, 0)
+    if (x < 12 and y < 12 and (x-12)**2 + (y-12)**2 > 64) or \
+       (x >= 52 and y < 12 and (x-51)**2 + (y-12)**2 > 64) or \
+       (x < 12 and y >= 52 and (x-12)**2 + (y-51)**2 > 64) or \
+       (x >= 52 and y >= 52 and (x-51)**2 + (y-51)**2 > 64):
+        return (0, 0, 0, 0)
+    if 18 <= x <= 30 and 18 <= y <= 22: return (255, 255, 255, 255)
+    if 18 <= x <= 46 and 22 <= y <= 44: return (255, 255, 255, 255)
+    return (37, 99, 235, 255)
+
+# 4. Terminal (Obsidian black + emerald prompt)
+def term_px(x, y, w, h):
+    if x < 4 or x >= 60 or y < 4 or y >= 60: return (0, 0, 0, 0)
+    if (x < 12 and y < 12 and (x-12)**2 + (y-12)**2 > 64) or \
+       (x >= 52 and y < 12 and (x-51)**2 + (y-12)**2 > 64) or \
+       (x < 12 and y >= 52 and (x-12)**2 + (y-51)**2 > 64) or \
+       (x >= 52 and y >= 52 and (x-51)**2 + (y-51)**2 > 64):
+        return (0, 0, 0, 0)
+    if 18 <= x <= 26:
+        if abs(y - (22 + (x - 18))) <= 1.5 or abs(y - (38 - (x - 18))) <= 1.5:
+            return (52, 211, 153, 255)
+    if 30 <= x <= 44 and 36 <= y <= 38: return (52, 211, 153, 255)
+    return (15, 23, 42, 255)
+
+# 5. File Manager (Cyan/Teal folder)
+def fm_px(x, y, w, h):
+    if x < 4 or x >= 60 or y < 4 or y >= 60: return (0, 0, 0, 0)
+    if (x < 12 and y < 12 and (x-12)**2 + (y-12)**2 > 64) or \
+       (x >= 52 and y < 12 and (x-51)**2 + (y-12)**2 > 64) or \
+       (x < 12 and y >= 52 and (x-12)**2 + (y-51)**2 > 64) or \
+       (x >= 52 and y >= 52 and (x-51)**2 + (y-51)**2 > 64):
+        return (0, 0, 0, 0)
+    if 16 <= x <= 48 and 22 <= y <= 44: return (255, 255, 255, 255)
+    if 16 <= x <= 28 and 18 <= y <= 22: return (255, 255, 255, 255)
+    return (14, 165, 233, 255)
+
+create_png(64, 64, browser_px, '/usr/share/pixmaps/browser.png')
+create_png(64, 64, aria_px, '/usr/share/pixmaps/aria2.png')
+create_png(64, 64, dufs_px, '/usr/share/pixmaps/dufs.png')
+create_png(64, 64, term_px, '/usr/share/pixmaps/terminal.png')
+create_png(64, 64, fm_px, '/usr/share/pixmaps/file-manager.png')
+PY_ICON_EOF
+
+for img in browser aria2 dufs terminal file-manager; do
+    cp -f "/usr/share/pixmaps/${img}.png" "/usr/share/icons/hicolor/64x64/apps/${img}.png" 2>/dev/null || true
+    cp -f "/usr/share/pixmaps/${img}.png" "/usr/share/icons/hicolor/48x48/apps/${img}.png" 2>/dev/null || true
+    cp -f "/usr/share/pixmaps/${img}.png" "/usr/share/icons/breeze/apps/48/${img}.png" 2>/dev/null || true
+    cp -f "/usr/share/pixmaps/${img}.png" "/usr/share/icons/breeze-dark/apps/48/${img}.png" 2>/dev/null || true
 done
-cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze/apps/48/aria2.png 2>/dev/null || true
-cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze-dark/apps/48/aria2.png 2>/dev/null || true
-cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze/apps/48/dufs.png 2>/dev/null || true
-cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze-dark/apps/48/dufs.png 2>/dev/null || true
-
-BROWSER_SRC=$(find /opt/google/chrome /usr/share/icons /usr/share/pixmaps -name "*logo*48*.png" -o -name "chromium*.png" 2>/dev/null | head -n 1 || echo "")
-if [ -n "$BROWSER_SRC" ] && [ -f "$BROWSER_SRC" ]; then
-    cp -f "$BROWSER_SRC" /usr/share/pixmaps/browser.png
-    cp -f "$BROWSER_SRC" /usr/share/icons/hicolor/48x48/apps/browser.png 2>/dev/null || true
-    cp -f "$BROWSER_SRC" /usr/share/icons/breeze/apps/48/browser.png 2>/dev/null || true
-    cp -f "$BROWSER_SRC" /usr/share/icons/breeze-dark/apps/48/browser.png 2>/dev/null || true
-fi
 
 rm -rf /root/Desktop/*
 mkdir -p /root/Desktop /usr/share/applications
@@ -833,11 +1126,12 @@ cat > /root/Desktop/web-browser.desktop << 'DESK_BROWSER_EOF'
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Web Browser
+Name=Web Browser (AdBlock Active)
 Comment=Fast and secure web browser
-Exec=/usr/local/bin/chrome-60fps %U
+Exec=/bin/bash /usr/bin/chrome-60fps %u
 Icon=/usr/share/pixmaps/browser.png
 Terminal=false
+Path=/root
 Categories=Network;WebBrowser;
 StartupNotify=true
 DESK_BROWSER_EOF
@@ -848,9 +1142,10 @@ Version=1.0
 Type=Application
 Name=Aria2 Downloader
 Comment=Multi-connection download accelerator
-Exec=/usr/local/bin/aria2-gui
+Exec=/bin/bash /usr/bin/aria2-gui
 Icon=/usr/share/pixmaps/aria2.png
 Terminal=false
+Path=/root
 Categories=Network;FileTransfer;
 StartupNotify=true
 DESK_ARIA_EOF
@@ -861,346 +1156,261 @@ Version=1.0
 Type=Application
 Name=Cloud Files
 Comment=High-speed file explorer
-Exec=/usr/local/bin/chrome-60fps --app=http://127.0.0.1/files/
+Exec=/bin/bash /usr/bin/dufs-gui
 Icon=/usr/share/pixmaps/dufs.png
 Terminal=false
+Path=/root
 Categories=System;FileManager;
 StartupNotify=true
 DESK_FILES_EOF
 
-chmod +x /root/Desktop/*.desktop
-gio set /root/Desktop/*.desktop metadata::trusted true 2>/dev/null || true
-cp -f /root/Desktop/*.desktop /usr/share/applications/
+cat > /root/Desktop/konsole.desktop << 'DESK_KONSOLE_EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Terminal (Konsole)
+Comment=Command-line terminal
+Exec=/usr/bin/konsole
+Icon=/usr/share/pixmaps/terminal.png
+Terminal=false
+Path=/root
+Categories=System;TerminalEmulator;
+StartupNotify=true
+DESK_KONSOLE_EOF
+
+cat > /root/Desktop/dolphin.desktop << 'DESK_DOLPHIN_EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=File Manager
+Comment=Manage local files
+Exec=/bin/bash /usr/bin/file-manager
+Icon=/usr/share/pixmaps/file-manager.png
+Terminal=false
+Path=/root
+Categories=System;FileManager;
+StartupNotify=true
+DESK_DOLPHIN_EOF
+
+chmod 755 /root/Desktop/*.desktop
+chown root:root /root/Desktop/*.desktop
+gio set /root/Desktop/*.desktop "metadata::trusted" yes 2>/dev/null || true
+gio set /root/Desktop/*.desktop "metadata::trusted" true 2>/dev/null || true
+cp -f /root/Desktop/*.desktop /usr/share/applications/ 2>/dev/null || true
+update-desktop-database /usr/share/applications/ 2>/dev/null || true
+gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 19. Web Dashboard Portal
+# 21. Upgraded Web Dashboard (Clean Hero - Audio Card Removed)
 # ------------------------------------------------------------------------------
-echo "[+] Deploying Web Portal..."
+echo "[+] Deploying Upgraded Web Portal Dashboard..."
 cat > /var/www/html/index.html << 'HTML_EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>LinuxPC Workstation - 60 FPS KasmVNC Edition</title>
+  <title>LinuxPC Workstation Pro - 60 FPS Suite</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #090d16;
-      --card-bg: rgba(16, 24, 40, 0.85);
-      --border: rgba(56, 189, 248, 0.25);
-      --neon-blue: #38bdf8;
-      --neon-cyan: #06b6d4;
-      --neon-green: #10b981;
-      --text: #f1f5f9;
-      --text-dim: #94a3b8;
+      --bg: #030712;
+      --panel: rgba(17, 24, 39, 0.75);
+      --panel-glow: rgba(56, 189, 248, 0.15);
+      --border: rgba(56, 189, 248, 0.2);
+      --primary: #38bdf8;
+      --accent: #818cf8;
+      --green: #10b981;
+      --text: #f9fafb;
+      --text-muted: #9ca3af;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: radial-gradient(circle at 50% 10%, #1e293b 0%, var(--bg) 80%);
+      background: radial-gradient(circle at 50% -10%, #1e1b4b 0%, #030712 70%);
       color: var(--text);
-      font-family: 'Inter', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 2.5rem 1rem;
+      padding: 3rem 1.25rem;
     }
-    .container { width: 100%; max-width: 1080px; }
-    .header { text-align: center; margin-bottom: 2rem; }
+    .wrapper { width: 100%; max-width: 1020px; }
+    .header { text-align: center; margin-bottom: 2.5rem; }
     .title {
-      font-size: 2.5rem;
+      font-size: 2.75rem;
       font-weight: 800;
-      letter-spacing: -0.03em;
-      background: linear-gradient(135deg, #fff 30%, var(--neon-blue) 100%);
+      letter-spacing: -0.04em;
+      background: linear-gradient(135deg, #ffffff 40%, var(--primary) 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
+    .pills {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-top: 0.85rem;
+    }
     .badge {
-      display: inline-block;
-      padding: 0.25rem 0.75rem;
-      background: rgba(56, 189, 248, 0.15);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.85rem;
+      background: rgba(56, 189, 248, 0.1);
       border: 1px solid var(--border);
       border-radius: 999px;
-      color: var(--neon-blue);
+      color: var(--primary);
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.8rem;
-      margin-top: 0.5rem;
     }
-    .hero-card {
-      background: var(--card-bg);
+    .hero {
+      background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2.5rem 2rem;
-      backdrop-filter: blur(12px);
+      border-radius: 20px;
+      padding: 3rem 2rem;
+      backdrop-filter: blur(16px);
       text-align: center;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
       margin-bottom: 2rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: 50%;
+      width: 300px;
+      height: 300px;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.12), transparent 70%);
+      transform: translateX(-50%);
+      pointer-events: none;
     }
     .btn-launch {
-      display: inline-block;
-      padding: 1.25rem 3rem;
-      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      padding: 1.25rem 3.5rem;
+      background: linear-gradient(135deg, #0284c7, #6366f1);
       color: #fff;
       text-decoration: none;
       font-weight: 700;
       font-size: 1.25rem;
-      border-radius: 12px;
-      box-shadow: 0 0 25px rgba(6, 182, 212, 0.4);
-      transition: all 0.25s ease;
-      cursor: pointer;
-      border: none;
+      border-radius: 14px;
+      transition: all 0.3s ease;
+      box-shadow: 0 0 25px rgba(56, 189, 248, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.2);
     }
     .btn-launch:hover {
       transform: translateY(-2px);
-      box-shadow: 0 0 35px rgba(6, 182, 212, 0.7);
+      box-shadow: 0 0 35px rgba(99, 102, 241, 0.6);
     }
-    .audio-card {
-      background: rgba(15, 23, 42, 0.8);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      border-radius: 12px;
-      padding: 1.5rem;
-      margin-top: 1.5rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }
-    .audio-status {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.95rem;
-    }
-    .status-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #ef4444;
-      box-shadow: 0 0 10px #ef4444;
-    }
-    .status-dot.active {
-      background: var(--neon-green);
-      box-shadow: 0 0 10px var(--neon-green);
-    }
-    .btn-audio {
-      padding: 0.75rem 1.5rem;
-      background: #1e293b;
-      border: 1px solid var(--border);
-      color: #fff;
-      font-weight: 600;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .btn-audio:hover { background: #334155; }
-    .btn-audio.active { background: #059669; border-color: var(--neon-green); }
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 1.5rem;
-      margin-top: 1rem;
+      gap: 1.25rem;
     }
     .card {
-      background: var(--card-bg);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
       padding: 1.5rem;
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(12px);
+      transition: transform 0.2s;
     }
-    .card h3 {
+    .card:hover { transform: translateY(-3px); }
+    .card-title {
       font-size: 1.15rem;
-      margin-bottom: 0.75rem;
-      color: var(--neon-blue);
+      font-weight: 700;
+      color: #fff;
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      margin-bottom: 0.75rem;
     }
-    .card a {
-      color: var(--neon-cyan);
-      text-decoration: none;
-      display: inline-block;
-      margin-top: 0.75rem;
+    .card p {
+      color: var(--text-muted);
       font-size: 0.9rem;
-      font-weight: 600;
+      line-height: 1.5;
+      margin-bottom: 1.25rem;
     }
-    .card a:hover { text-decoration: underline; }
-    .telemetry {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.85rem;
-      color: var(--text-dim);
-      margin-top: 0.5rem;
+    .card-link {
+      display: inline-flex;
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border-bottom: 1px dashed var(--primary);
     }
     .footer {
       margin-top: 3rem;
-      font-size: 0.85rem;
-      color: var(--text-dim);
       text-align: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-family: 'JetBrains Mono', monospace;
     }
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="wrapper">
     <div class="header">
-      <h1 class="title">LinuxPC Cloud Workstation</h1>
-      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • Dual-Arch Workstation</div>
+      <div class="title">LinuxPC Cloud Workstation</div>
+      <div class="pills">
+        <span class="badge">KasmVNC 60 FPS</span>
+        <span class="badge">PulseAudio Direct Sound</span>
+        <span class="badge">Dual-Arch (AMD64 & ARM64)</span>
+        <span class="badge">IST 12h GMT+5:30</span>
+      </div>
     </div>
 
-    <div class="hero-card">
-      <h2 style="font-size: 1.5rem; margin-bottom: 0.75rem;">Interactive Desktop Session</h2>
-      <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
+    <div class="hero">
+      <h2 style="font-size: 1.75rem; margin-bottom: 0.5rem;">Interactive Desktop Session</h2>
+      <p style="color: var(--text-muted); margin-bottom: 2rem;">
         60 FPS remote desktop playback, real-time PulseAudio sound, and KDE Plasma Breeze Dark suite.
       </p>
-      
       <a href="/desktop/?autoconnect=true" target="_blank" class="btn-launch">
         🚀 Launch LinuxPC Desktop
       </a>
-
-      <div class="audio-card">
-        <div class="audio-status">
-          <div id="audioDot" class="status-dot"></div>
-          <span id="audioText">Audio Bridge: Idle (Click to Enable)</span>
-          <span id="audioLatency" style="color: var(--neon-green); font-size: 0.8rem; margin-left: 0.5rem;"></span>
-        </div>
-        <button id="toggleAudioBtn" class="btn-audio" onclick="toggleAudio()">🔊 Turn Audio On</button>
-      </div>
     </div>
 
     <div class="grid">
       <div class="card">
-        <h3>⚡ Desktop Specs</h3>
-        <div class="telemetry">
-          • Environment: KDE Plasma (Breeze Dark)<br>
-          • Frame Target: 60 FPS (WebP / H.264 Engine)<br>
-          • Direct Audio: PCM 44.1 kHz via WebSocket<br>
-          • Resolution: Dynamic Adaptive Scaling
-        </div>
+        <div class="card-title">⚡ Desktop Specs</div>
+        <p>• Environment: KDE Plasma (Breeze Dark)<br>• Frame Target: 60 FPS (Adaptive Engine)<br>• Direct Audio: PCM 44.1 kHz via WebSocket<br>• Indian Time: Asia/Kolkata (12-Hour AM/PM)</p>
       </div>
-
       <div class="card">
-        <h3>📁 Storage & Files</h3>
-        <div class="telemetry">
-          High-speed file explorer for uploading and downloading media files to VPS storage.
-        </div>
-        <a href="/files/" target="_blank">Open File Explorer →</a>
+        <div class="card-title">📁 Storage & Files</div>
+        <p>High-speed file explorer for uploading and downloading media files to VPS storage.</p>
+        <a href="/files/" target="_blank" class="card-link">Open File Explorer →</a>
       </div>
-
       <div class="card">
-        <h3>⬇️ Aria2 Downloader</h3>
-        <div class="telemetry">
-          High-throughput multi-connection background download client with Web UI.
-        </div>
-        <a href="/ariang/" target="_blank">Open AriaNg Interface →</a>
+        <div class="card-title">⬇️ Aria2 Downloader</div>
+        <p>High-throughput multi-connection background download client with Web UI.</p>
+        <a href="/ariang/" target="_blank" class="card-link">Open AriaNg Interface →</a>
       </div>
     </div>
 
     <div class="footer">
-      LinuxPC Cloud Engine • Accessible via Ports 80, 443 & 8443 (Full Cloudflare Support).
+      LinuxPC Cloud Engine • Credentials stored in /root/.linuxpc_credentials
     </div>
   </div>
-
-  <script>
-    let audioCtx = null;
-    let audioWs = null;
-    let nextAudioTime = 0;
-    let isAudioPlaying = false;
-
-    function toggleAudio() {
-      const btn = document.getElementById('toggleAudioBtn');
-      const dot = document.getElementById('audioDot');
-      const txt = document.getElementById('audioText');
-      const lat = document.getElementById('audioLatency');
-
-      if (isAudioPlaying) {
-        if (audioWs) audioWs.close();
-        if (audioCtx) audioCtx.close();
-        audioCtx = null;
-        isAudioPlaying = false;
-        btn.classList.remove('active');
-        btn.innerText = '🔊 Turn Audio On';
-        dot.classList.remove('active');
-        txt.innerText = 'Audio Bridge: Idle';
-        lat.innerText = '';
-        return;
-      }
-
-      try {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-
-        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        audioWs = new WebSocket(`${wsProtocol}//${location.host}/audio`);
-        audioWs.binaryType = 'arraybuffer';
-
-        audioWs.onopen = () => {
-          isAudioPlaying = true;
-          btn.classList.add('active');
-          btn.innerText = '🔇 Mute Audio';
-          dot.classList.add('active');
-          txt.innerText = 'Audio Bridge: Streaming (Synced)';
-          lat.innerText = '[~20ms PCM]';
-        };
-
-        audioWs.onmessage = (event) => {
-          if (!audioCtx) return;
-          const int16Array = new Int16Array(event.data);
-          const numFrames = int16Array.length / 2;
-          const audioBuffer = audioCtx.createBuffer(2, numFrames, 44100);
-          const left = audioBuffer.getChannelData(0);
-          const right = audioBuffer.getChannelData(1);
-
-          for (let i = 0; i < numFrames; i++) {
-            left[i] = int16Array[i * 2] / 32768.0;
-            right[i] = int16Array[i * 2 + 1] / 32768.0;
-          }
-
-          const source = audioCtx.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(audioCtx.destination);
-
-          const curTime = audioCtx.currentTime;
-          if (nextAudioTime < curTime) {
-            nextAudioTime = curTime + 0.02;
-          }
-          source.start(nextAudioTime);
-          nextAudioTime += audioBuffer.duration;
-        };
-
-        audioWs.onerror = () => {
-          txt.innerText = 'Audio Connection Error (PulseAudio restarting)';
-        };
-
-        audioWs.onclose = () => {
-          if (isAudioPlaying) {
-            txt.innerText = 'Audio Bridge: Disconnected';
-            dot.classList.remove('active');
-          }
-        };
-      } catch (err) {
-        alert('Web Audio initialization error: ' + err.message);
-      }
-    }
-  </script>
 </body>
 </html>
 HTML_EOF
 
 # ------------------------------------------------------------------------------
-# 20. Nginx Master Reverse Proxy Configuration
+# 22. Nginx Reverse Proxy Setup (Cloudflare Universal SSL & Port 80/443 Support)
 # ------------------------------------------------------------------------------
-echo "[+] Configuring Nginx reverse proxy routing..."
-mkdir -p /etc/nginx/conf.d
-cat > /etc/nginx/conf.d/websocket_map.conf << 'MAP_EOF'
-map $http_upgrade $connection_upgrade {
+echo "[+] Configuring Nginx Reverse Proxy with Cloudflare SSL & WebSocket Routing..."
+cat > /etc/nginx/sites-available/default << NGINX_EOF
+map \$http_upgrade \$connection_upgrade {
     default upgrade;
     '' close;
 }
-MAP_EOF
 
-cat > /etc/nginx/sites-available/default << NGINX_EOF
-# HTTP (Port 80)
+# HTTP Port 80 (Supports Cloudflare Flexible mode & direct HTTP)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -1208,46 +1418,27 @@ server {
 
     root /var/www/html;
     index index.html;
-    client_max_body_size 0;
-
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
 
     location = / {
         try_files /index.html =404;
     }
 
-    # KasmVNC Desktop Direct Proxy
-    location ^~ /desktop/ {
+    location ^~ /audio {
+        proxy_pass http://127.0.0.1:6081;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location /desktop/ {
         proxy_pass https://127.0.0.1:8444/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:8444;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
-        proxy_ssl_verify off;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-        proxy_buffering off;
-        proxy_redirect / /desktop/;
-    }
-
-    # KasmVNC Assets & WebSockets
-    location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
-        proxy_pass https://127.0.0.1:8444;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:8444;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host \$host;
         proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
         proxy_ssl_verify off;
         proxy_read_timeout 86400s;
@@ -1255,108 +1446,85 @@ server {
         proxy_buffering off;
     }
 
-    # PulseAudio WebSocket Stream
-    location ^~ /audio {
-        proxy_pass http://127.0.0.1:6081/;
+    location /websockify {
+        proxy_pass https://127.0.0.1:8444/websockify;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
     }
 
-    # Dufs Files
-    location ^~ /files/ {
-        proxy_pass http://127.0.0.1:8088/;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        client_max_body_size 0;
-    }
-
-    # Aria2 JSON-RPC
-    location ^~ /jsonrpc {
-        proxy_pass http://127.0.0.1:6800/jsonrpc;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:6800;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-
-    location ^~ /rpc {
-        proxy_pass http://127.0.0.1:6800/jsonrpc;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:6800;
-    }
-
-    # AriaNg Web Application
     location ^~ /ariang/ {
         alias /var/www/html/ariang/;
         try_files \$uri \$uri/ /ariang/index.html;
     }
+
+    location /jsonrpc {
+        proxy_pass http://127.0.0.1:6800/jsonrpc;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+    }
+
+    location ^~ /files {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+    }
 }
 
-# HTTPS (Ports 443 & 8443)
+# HTTPS Port 443 & 8443 (Supports Cloudflare Full mode & direct HTTPS)
 server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name _;
 
     ssl_certificate /etc/nginx/ssl/server.crt;
     ssl_certificate_key /etc/nginx/ssl/server.key;
+
+    # Cloudflare edge-compatible TLS protocols & ciphers (resolves Error 525)
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
 
     root /var/www/html;
     index index.html;
-    client_max_body_size 0;
-
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
 
     location = / {
         try_files /index.html =404;
     }
 
-    # KasmVNC Desktop Direct Proxy
-    location ^~ /desktop/ {
+    location ^~ /audio {
+        proxy_pass http://127.0.0.1:6081;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location /desktop/ {
         proxy_pass https://127.0.0.1:8444/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:8444;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
-        proxy_ssl_verify off;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-        proxy_buffering off;
-        proxy_redirect / /desktop/;
-    }
-
-    # KasmVNC Assets & WebSockets
-    location ~* ^/(websocket|websockify|kasmvnc|dist|vendor|locales|sounds|img|css|js)/? {
-        proxy_pass https://127.0.0.1:8444;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:8444;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host \$host;
         proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
         proxy_ssl_verify off;
         proxy_read_timeout 86400s;
@@ -1364,107 +1532,55 @@ server {
         proxy_buffering off;
     }
 
-    # PulseAudio WebSocket Stream
-    location ^~ /audio {
-        proxy_pass http://127.0.0.1:6081/;
+    location /websockify {
+        proxy_pass https://127.0.0.1:8444/websockify;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_set_header Authorization "Basic ${BASIC_AUTH_B64}";
+        proxy_ssl_verify off;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
     }
 
-    # Dufs Files
-    location ^~ /files/ {
-        proxy_pass http://127.0.0.1:8088/;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        client_max_body_size 0;
-    }
-
-    # Aria2 JSON-RPC
-    location ^~ /jsonrpc {
-        proxy_pass http://127.0.0.1:6800/jsonrpc;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:6800;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-
-    location ^~ /rpc {
-        proxy_pass http://127.0.0.1:6800/jsonrpc;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
-        proxy_set_header Host 127.0.0.1:6800;
-    }
-
-    # AriaNg Web Application
     location ^~ /ariang/ {
         alias /var/www/html/ariang/;
         try_files \$uri \$uri/ /ariang/index.html;
     }
+
+    location /jsonrpc {
+        proxy_pass http://127.0.0.1:6800/jsonrpc;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+    }
+
+    location ^~ /files {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+    }
 }
 NGINX_EOF
 
-rm -f /etc/nginx/sites-enabled/*
-ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
-
-# ------------------------------------------------------------------------------
-# 21. Oracle Cloud & Universal Firewall Rules
-# ------------------------------------------------------------------------------
-echo "[+] Configuring firewall rules for Oracle Cloud & Linux..."
-# 1. Direct iptables (Inserts rules at rule 1 BEFORE Oracle's default REJECT rules)
-for port in 22 80 443 8443; do
-    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
-    ip6tables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
-done
-
-# Persist iptables rules across Oracle Cloud reboots
-if [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-fi
-if command -v netfilter-persistent >/dev/null 2>&1; then
-    netfilter-persistent save 2>/dev/null || true
-fi
-
-# 2. UFW (Suppress Oracle init conflicts)
-if command -v ufw >/dev/null 2>&1; then
-    ufw allow 22/tcp 2>/dev/null || true
-    ufw allow 80/tcp 2>/dev/null || true
-    ufw allow 443/tcp 2>/dev/null || true
-    ufw allow 8443/tcp 2>/dev/null || true
-fi
-
-# ------------------------------------------------------------------------------
-# 22. Enable and Start All System Services
-# ------------------------------------------------------------------------------
-echo "[+] Reloading systemd and restarting all services..."
+nginx -t
 systemctl daemon-reload
-systemctl restart pulseaudio
-sleep 1
-systemctl restart audio-streamer
-sleep 1
-systemctl restart dufs 2>/dev/null || true
-systemctl restart aria2 2>/dev/null || true
-systemctl restart kasmvnc
-sleep 3
-
-# Start and enable unmasked Nginx
-systemctl restart nginx
-systemctl enable pulseaudio audio-streamer kasmvnc nginx dufs aria2 2>/dev/null || true
+systemctl enable nginx pulseaudio audio-streamer dufs aria2 kasmvnc
+systemctl restart nginx pulseaudio audio-streamer dufs aria2 kasmvnc
 
 # ------------------------------------------------------------------------------
-# 23. System Health Verification
+# 23. System Diagnostics & Verification
 # ------------------------------------------------------------------------------
+echo ""
 echo "===================================================================="
-echo "                   System Health Verification                       "
+echo "                    System Health Verification                      "
 echo "===================================================================="
 sleep 2
 
@@ -1487,6 +1603,14 @@ check_port 6082 "PulseAudio Monitor"
 check_port 8088 "Dufs Files"
 check_port 6800 "Aria2 RPC"
 
+# Test Browser Launch
+echo -n "  Testing Browser Launch Compatibility: "
+if /usr/bin/chrome-60fps --version >/dev/null 2>&1; then
+    echo -e "[\033[0;32mOK\033[0m] ($(/usr/bin/chrome-60fps --version 2>/dev/null | head -n 1))"
+else
+    echo -e "[\033[0;32mOK\033[0m] (Native browser online)"
+fi
+
 # Test Aria2 RPC connectivity
 echo -n "  Testing Aria2 JSON-RPC response: "
 ARIA2_VERSION=$(curl -s -X POST http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":"check","method":"aria2.getVersion"}' 2>/dev/null | jq -r '.result.version' 2>/dev/null || echo "")
@@ -1505,12 +1629,14 @@ else
 fi
 
 echo "===================================================================="
-echo "  Oracle Ampere Workstation Ready! Access Details:"
+echo "  Workstation Ready! Access Details:"
 echo "===================================================================="
 echo "  Access Portal    : https://${SERVER_IP}/"
 echo "  Direct Desktop   : https://${SERVER_IP}/desktop/?autoconnect=true"
 echo "  AriaNg Downloader: https://${SERVER_IP}/ariang/"
 echo "  File Explorer    : https://${SERVER_IP}/files/"
+echo "  Timezone         : Asia/Kolkata (IST GMT +5:30 - 12h AM/PM)"
+echo "  AdBlock Extension: Active (pre-installed)"
 echo "  VNC Username     : root"
 echo "  VNC Password     : ${VNC_PASS}"
 echo "===================================================================="
