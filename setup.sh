@@ -1,22 +1,31 @@
 cat > setup.sh << 'EOF'
 #!/bin/bash
 # ==============================================================================
-# LinuxPC Cloud Workstation Setup - KasmVNC 60 FPS & Multi-Service Audio Suite
-# Supported OS: Ubuntu 22.04 LTS (Jammy Jellyfish) - UpCloud VPS Optimized
+# LinuxPC Cloud Workstation Setup - Universal Dual-Arch (AMD64 & ARM64)
+# Compatible with: Oracle Cloud Ampere A1 (ARM64) & UpCloud / Standard (x86_64)
+# OS: Ubuntu 22.04 LTS (Jammy Jellyfish)
 # Ports: 22 (SSH), 80 (HTTP), 443 (HTTPS), 8443 (Alt HTTPS)
 # Services: KasmVNC, KDE Plasma, PulseAudio, Audio Streamer, Dufs, Aria2, Nginx
 # ==============================================================================
 set -e
 
 echo "===================================================================="
-echo "      Starting LinuxPC Workstation Setup (Ubuntu 22.04 / UpCloud)   "
+echo "    Starting LinuxPC Workstation Setup (Dual-Arch: AMD64 & ARM64)   "
 echo "===================================================================="
 
 # ------------------------------------------------------------------------------
-# 1. Environment & Dynamic Variables Detection
+# 1. Architecture & Public IP Detection
 # ------------------------------------------------------------------------------
 ARCH=$(uname -m)
-if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ]; then
+if [ "$ARCH" = "x86_64" ]; then
+    DEB_ARCH="amd64"
+    DUFS_ARCH="x86_64"
+    echo "[+] Architecture detected: AMD64 / x86_64"
+elif [ "$ARCH" = "aarch64" ]; then
+    DEB_ARCH="arm64"
+    DUFS_ARCH="aarch64"
+    echo "[+] Architecture detected: ARM64 / aarch64 (Ampere)"
+else
     echo "[-] Unsupported CPU architecture: $ARCH"
     exit 1
 fi
@@ -26,7 +35,7 @@ SERVER_IP="${SERVER_IP:-$(curl -4s --max-time 4 https://ifconfig.me 2>/dev/null 
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
 echo "[+] Target Public IP: ${SERVER_IP}"
 
-# Maintain existing credentials or generate a strong new password
+# Maintain or generate strong credentials
 if [ -f /root/.linuxpc_credentials ]; then
     VNC_PASS=$(grep -i "Password" /root/.linuxpc_credentials | awk '{print $NF}')
 fi
@@ -36,7 +45,7 @@ fi
 BASIC_AUTH_B64=$(printf "%s" "root:${VNC_PASS}" | base64 | tr -d '\n')
 
 # ------------------------------------------------------------------------------
-# 2. Cleanup Legacy Processes, Locks & Port Holders
+# 2. Cleanup Legacy Processes, Display Locks & Unmask Nginx
 # ------------------------------------------------------------------------------
 echo "[+] Cleaning legacy processes and freeing X11 display & network ports..."
 systemctl stop kasmvnc pulseaudio audio-streamer dufs aria2 nginx websockify 2>/dev/null || true
@@ -47,6 +56,7 @@ pkill -9 -f audio-streamer 2>/dev/null || true
 pkill -9 -f dufs 2>/dev/null || true
 pkill -9 -f aria2c 2>/dev/null || true
 pkill -9 -f chrome 2>/dev/null || true
+pkill -9 -f chromium 2>/dev/null || true
 pkill -9 -f websockify 2>/dev/null || true
 
 # Force release audio & websocket ports
@@ -55,10 +65,17 @@ fuser -k 6082/tcp 2>/dev/null || true
 fuser -k 8444/tcp 2>/dev/null || true
 
 rm -rf /tmp/.X11-unix/X* /tmp/.X*-lock /root/.vnc/*.pid /root/.vnc/*.log 2>/dev/null || true
-rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
+rm -f /root/.config/google-chrome/Singleton* /root/.config/chromium/Singleton* 2>/dev/null || true
+
+# Unmask Nginx (fixes Oracle Cloud masked unit error)
+echo "[+] Unmasking Nginx service..."
+systemctl unmask nginx.service 2>/dev/null || true
+systemctl unmask nginx 2>/dev/null || true
+rm -f /etc/systemd/system/nginx.service 2>/dev/null || true
+systemctl daemon-reload
 
 # ------------------------------------------------------------------------------
-# 3. Kernel & TCP Socket Low-Latency Tuning
+# 3. Kernel & TCP Network Socket Latency Tuning
 # ------------------------------------------------------------------------------
 echo "[+] Optimizing network stack and socket buffers for 60 FPS streaming..."
 cat > /etc/sysctl.d/99-linuxpc-latency.conf << 'SYSCTL_EOF'
@@ -73,15 +90,15 @@ SYSCTL_EOF
 sysctl -p /etc/sysctl.d/99-linuxpc-latency.conf >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------------------------
-# 4. APT Initialization & Safe Lock Handling
+# 4. APT Initialization & Safe Lock Wait
 # ------------------------------------------------------------------------------
-echo "[+] Preparing APT environment..."
+echo "[+] Preparing APT repositories..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
 while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-    echo "[i] Waiting for background updates / cloud-init to release APT lock..."
+    echo "[i] Waiting for background system updates to release APT lock..."
     sleep 3
 done
 
@@ -91,9 +108,9 @@ echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99translations 2>/dev/nu
 apt-get update -qq
 
 # ------------------------------------------------------------------------------
-# 5. Core Desktop Stack, Themes, Tools & Dependencies
+# 5. Core Desktop Stack, Themes, Tools & Audio
 # ------------------------------------------------------------------------------
-echo "[+] Installing full desktop stack, SVG & PNG icon engines, and tools..."
+echo "[+] Installing full KDE Plasma desktop stack, icon engines, and tools..."
 apt-get install -y -qq \
     kde-plasma-desktop \
     plasma-desktop \
@@ -148,30 +165,33 @@ apt-get install -y -qq \
     ca-certificates \
     openssl \
     net-tools \
-    ufw
+    iptables-persistent 2>/dev/null || true
 
 [ -f /usr/bin/startplasma-x11 ] && ln -sf /usr/bin/startplasma-x11 /usr/bin/startkde 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 6. Install Google Chrome Stable
+# 6. Install Browser (Dynamic for AMD64 & ARM64)
 # ------------------------------------------------------------------------------
-if ! command -v google-chrome >/dev/null 2>&1; then
-    echo "[+] Installing Google Chrome Stable..."
-    wget -q -O /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" 2>/dev/null || true
-    if [ -f /tmp/google-chrome.deb ]; then
-        apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
-        rm -f /tmp/google-chrome.deb
+if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
+    echo "[+] Installing Web Browser for ${DEB_ARCH}..."
+    CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_${DEB_ARCH}.deb"
+    
+    if curl -fsIL --max-time 5 "${CHROME_URL}" >/dev/null 2>&1; then
+        echo "[+] Downloading official Google Chrome (${DEB_ARCH})..."
+        wget -q -O /tmp/chrome.deb "${CHROME_URL}" 2>/dev/null || true
+        apt-get install -y /tmp/chrome.deb 2>/dev/null || apt-get install -f -y
+        rm -f /tmp/chrome.deb
+    else
+        echo "[+] Fallback: Installing native Chromium..."
+        apt-get install -y chromium-browser 2>/dev/null || apt-get install -y chromium 2>/dev/null || true
     fi
 fi
 
 # ------------------------------------------------------------------------------
-# 7. Install KasmVNC Server 1.5.0
+# 7. Install KasmVNC Server 1.5.0 (Architecture-Matched)
 # ------------------------------------------------------------------------------
 if ! dpkg -l | grep -q kasmvncserver; then
-    KASMVNC_DEB="kasmvncserver_jammy_1.5.0_${ARCH}.deb"
-    [ "$ARCH" = "x86_64" ] && KASMVNC_DEB="kasmvncserver_jammy_1.5.0_amd64.deb"
-    [ "$ARCH" = "aarch64" ] && KASMVNC_DEB="kasmvncserver_jammy_1.5.0_arm64.deb"
-
+    KASMVNC_DEB="kasmvncserver_jammy_1.5.0_${DEB_ARCH}.deb"
     echo "[+] Downloading and installing KasmVNC (${KASMVNC_DEB})..."
     KASMVNC_URL="https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/${KASMVNC_DEB}"
     curl -fSL -o "/tmp/${KASMVNC_DEB}" "${KASMVNC_URL}"
@@ -242,6 +262,7 @@ library=org.kde.breeze
 theme=Breeze
 KDE_EOF
 
+# Compositing disabled for direct X11 frame grabbing at 60 FPS
 cat > /root/.config/kwinrc << 'KWIN_EOF'
 [org.kde.kdecoration2]
 BorderSize=Normal
@@ -296,9 +317,6 @@ gtk-font-name=Noto Sans 10
 gtk-application-prefer-dark-theme=1
 GTK4_EOF
 
-command -v plasma-apply-lookandfeel >/dev/null 2>&1 && plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
-command -v plasma-apply-colorscheme >/dev/null 2>&1 && plasma-apply-colorscheme BreezeDark 2>/dev/null || true
-
 # ------------------------------------------------------------------------------
 # 9. SSL Certificates Setup
 # ------------------------------------------------------------------------------
@@ -339,66 +357,20 @@ openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
 rm -f /tmp/openssl_san.cnf
 
 # ------------------------------------------------------------------------------
-# 10. Automated KasmVNC Credentials Configuration (With -wo Write Permissions)
+# 10. Automated KasmVNC Credentials Configuration (-w -o Write/Owner)
 # ------------------------------------------------------------------------------
 echo "[+] Configuring KasmVNC user credentials with Owner & Write permissions..."
 mkdir -p /root/.vnc /etc/kasmvnc
 touch /root/.vnc/.de-was-selected
 
-# Purge any stale or corrupt password files
 rm -f /root/.kasmpasswd /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd /etc/kasmvnc/kasmvncpasswd.bak 2>/dev/null || true
 
-# Create root user with explicit Write (-w) and Owner (-o) flags
-printf "%s\n%s\n" "${VNC_PASS}" "${VNC_PASS}" | kasmvncpasswd -u root -wo 2>/dev/null || true
+printf "%s\n%s\n" "${VNC_PASS}" "${VNC_PASS}" | kasmvncpasswd -u root -w -o 2>/dev/null || true
 
-# Fallback pty creator if pipe didn't populate
-if [ ! -f /root/.kasmpasswd ] || ! grep -q "^root:" /root/.kasmpasswd 2>/dev/null; then
-python3 - << PY_AUTH_EOF
-import os, pty, select, subprocess, time
-
-password = "${VNC_PASS}"
-username = "root"
-
-master, slave = pty.openpty()
-proc = subprocess.Popen(
-    ["kasmvncpasswd", "-u", username, "-wo"],
-    stdin=slave, stdout=slave, stderr=slave, close_fds=True
-)
-os.close(slave)
-
-start = time.time()
-passwords_sent = 0
-
-while proc.poll() is None and (time.time() - start) < 6:
-    r, _, _ = select.select([master], [], [], 0.3)
-    if r:
-        try:
-            chunk = os.read(master, 1024).decode("utf-8", errors="ignore")
-            if ("password" in chunk.lower() or "verify" in chunk.lower()) and passwords_sent < 2:
-                time.sleep(0.1)
-                os.write(master, (password + "\n").encode())
-                passwords_sent += 1
-            elif any(k in chunk.lower() for k in ["select", "action", "access", "mode"]):
-                time.sleep(0.1)
-                os.write(master, b"1\n")
-        except OSError:
-            break
-
-try:
-    os.close(master)
-except Exception:
-    pass
-
-proc.wait(timeout=3)
-PY_AUTH_EOF
-fi
-
-# Guarantee the permissions field strictly ends with ':ow'
 if [ -f /root/.kasmpasswd ]; then
     sed -i 's/^\(root:[^:]*\)\(:.*\)\?$/\1:ow/' /root/.kasmpasswd 2>/dev/null || true
 fi
 
-# Distribute password file to all required locations
 for p in /root/.kasmpasswd /root/.vnc/.kasmpasswd /root/.vnc/kasmpasswd /etc/kasmvnc/kasmvncpasswd; do
     mkdir -p "$(dirname "$p")"
     [ -f /root/.kasmpasswd ] && cp -f /root/.kasmpasswd "$p" 2>/dev/null || true
@@ -430,8 +402,8 @@ export QT_QPA_PLATFORM=xcb
 export DISPLAY=:1
 export PULSE_SERVER=127.0.0.1:4713
 
-export QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins"
-export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
+export QT_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins:/usr/lib/aarch64-linux-gnu/qt5/plugins:/usr/lib/qt5/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms:/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
 export XDG_DATA_DIRS="/usr/local/share:/usr/share:/var/lib/snapd/desktop"
 export XDG_CONFIG_DIRS="/etc/xdg"
 export QT_STYLE_OVERRIDE="Breeze"
@@ -443,6 +415,7 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     eval $(dbus-launch --sh-syntax --exit-with-session)
 fi
 
+# Apply Breeze Dark look and feel inside active X11 display
 plasma-apply-lookandfeel -a org.kde.breezedark.desktop 2>/dev/null || true
 plasma-apply-colorscheme BreezeDark 2>/dev/null || true
 kbuildsycoca5 --noincremental 2>/dev/null || true
@@ -460,7 +433,6 @@ XSTARTUP_EOF
 chmod +x /root/.vnc/xstartup
 cp -f /root/.vnc/xstartup /etc/kasmvnc/xstartup 2>/dev/null || true
 
-# Strict valid YAML syntax (allow_resize directly under desktop)
 cat > /etc/kasmvnc/kasmvnc.yaml << 'YAML_EOF'
 desktop:
   resolution:
@@ -639,17 +611,17 @@ WantedBy=multi-user.target
 KASMVNC_SVC_EOF
 
 # ------------------------------------------------------------------------------
-# 15. Google Chrome 60 FPS Headless Binary Wrapper
+# 15. Universal Browser 60 FPS Binary Wrapper
 # ------------------------------------------------------------------------------
 cat > /usr/local/bin/chrome-60fps << 'CHROME_EOF'
 #!/bin/bash
 export DISPLAY="${DISPLAY:-:1}"
 export PULSE_SERVER="127.0.0.1:4713"
-rm -f /root/.config/google-chrome/Singleton* 2>/dev/null || true
+rm -f /root/.config/google-chrome/Singleton* /root/.config/chromium/Singleton* 2>/dev/null || true
 
-REAL_CHROME=$(command -v google-chrome-stable || command -v google-chrome || echo "/opt/google/chrome/chrome")
+REAL_BROWSER=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium || echo "/usr/bin/chromium-browser")
 
-exec "${REAL_CHROME}" \
+exec "${REAL_BROWSER}" \
     --no-sandbox \
     --test-type \
     --disable-infobars \
@@ -660,18 +632,16 @@ exec "${REAL_CHROME}" \
     --disable-gpu \
     --force-dark-mode \
     --enable-features=WebUIDarkMode \
-    --user-data-dir=/root/.config/google-chrome \
+    --user-data-dir=/root/.config/browser-data \
     "$@"
 CHROME_EOF
 chmod +x /usr/local/bin/chrome-60fps
 
 # ------------------------------------------------------------------------------
-# 16. Dufs File Explorer (Port 8088)
+# 16. Dufs File Explorer (Port 8088 - Dual-Arch)
 # ------------------------------------------------------------------------------
 echo "[+] Configuring Dufs Fast File Manager..."
 if [ ! -f /usr/local/bin/dufs ]; then
-    DUFS_ARCH="x86_64"
-    [ "$ARCH" = "aarch64" ] && DUFS_ARCH="aarch64"
     DUFS_VER="v0.43.0"
     curl -fsSL "https://github.com/sigoden/dufs/releases/download/${DUFS_VER}/dufs-${DUFS_VER}-${DUFS_ARCH}-unknown-linux-musl.tar.gz" | tar -xz -C /usr/local/bin dufs 2>/dev/null || true
     chmod +x /usr/local/bin/dufs 2>/dev/null || true
@@ -848,29 +818,29 @@ cp -f /usr/share/pixmaps/aria2.png /usr/share/icons/breeze-dark/apps/48/aria2.pn
 cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze/apps/48/dufs.png 2>/dev/null || true
 cp -f /usr/share/pixmaps/dufs.png /usr/share/icons/breeze-dark/apps/48/dufs.png 2>/dev/null || true
 
-CHROME_SRC=$(find /opt/google/chrome /usr/share/icons -name "product_logo_48.png" 2>/dev/null | head -n 1 || echo "")
-if [ -n "$CHROME_SRC" ] && [ -f "$CHROME_SRC" ]; then
-    cp -f "$CHROME_SRC" /usr/share/pixmaps/google-chrome.png
-    cp -f "$CHROME_SRC" /usr/share/icons/hicolor/48x48/apps/google-chrome.png
-    cp -f "$CHROME_SRC" /usr/share/icons/breeze/apps/48/google-chrome.png 2>/dev/null || true
-    cp -f "$CHROME_SRC" /usr/share/icons/breeze-dark/apps/48/google-chrome.png 2>/dev/null || true
+BROWSER_SRC=$(find /opt/google/chrome /usr/share/icons /usr/share/pixmaps -name "*logo*48*.png" -o -name "chromium*.png" 2>/dev/null | head -n 1 || echo "")
+if [ -n "$BROWSER_SRC" ] && [ -f "$BROWSER_SRC" ]; then
+    cp -f "$BROWSER_SRC" /usr/share/pixmaps/browser.png
+    cp -f "$BROWSER_SRC" /usr/share/icons/hicolor/48x48/apps/browser.png 2>/dev/null || true
+    cp -f "$BROWSER_SRC" /usr/share/icons/breeze/apps/48/browser.png 2>/dev/null || true
+    cp -f "$BROWSER_SRC" /usr/share/icons/breeze-dark/apps/48/browser.png 2>/dev/null || true
 fi
 
 rm -rf /root/Desktop/*
 mkdir -p /root/Desktop /usr/share/applications
 
-cat > /root/Desktop/google-chrome.desktop << 'DESK_CHROME_EOF'
+cat > /root/Desktop/web-browser.desktop << 'DESK_BROWSER_EOF'
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Google Chrome
+Name=Web Browser
 Comment=Fast and secure web browser
 Exec=/usr/local/bin/chrome-60fps %U
-Icon=/usr/share/pixmaps/google-chrome.png
+Icon=/usr/share/pixmaps/browser.png
 Terminal=false
 Categories=Network;WebBrowser;
 StartupNotify=true
-DESK_CHROME_EOF
+DESK_BROWSER_EOF
 
 cat > /root/Desktop/aria2-downloader.desktop << 'DESK_ARIA_EOF'
 [Desktop Entry]
@@ -1075,13 +1045,13 @@ cat > /var/www/html/index.html << 'HTML_EOF'
   <div class="container">
     <div class="header">
       <h1 class="title">LinuxPC Cloud Workstation</h1>
-      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • UpCloud Cloud Stack</div>
+      <div class="badge">KasmVNC 60 FPS • PulseAudio Sub-25ms • Dual-Arch Workstation</div>
     </div>
 
     <div class="hero-card">
       <h2 style="font-size: 1.5rem; margin-bottom: 0.75rem;">Interactive Desktop Session</h2>
       <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
-        60 FPS video playback in Google Chrome, real-time PulseAudio sound, and KDE Plasma Breeze Dark suite.
+        60 FPS remote desktop playback, real-time PulseAudio sound, and KDE Plasma Breeze Dark suite.
       </p>
       
       <a href="/desktop/?autoconnect=true" target="_blank" class="btn-launch">
@@ -1446,14 +1416,30 @@ rm -f /etc/nginx/sites-enabled/*
 ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
 
 # ------------------------------------------------------------------------------
-# 21. UpCloud Firewall Rules (UFW)
+# 21. Oracle Cloud & Universal Firewall Rules
 # ------------------------------------------------------------------------------
-echo "[+] Ensuring firewall rules for essential ports (22, 80, 443, 8443)..."
+echo "[+] Configuring firewall rules for Oracle Cloud & Linux..."
+# 1. Direct iptables (Inserts rules at rule 1 BEFORE Oracle's default REJECT rules)
+for port in 22 80 443 8443; do
+    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    ip6tables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+done
+
+# Persist iptables rules across Oracle Cloud reboots
+if [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+fi
+if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save 2>/dev/null || true
+fi
+
+# 2. UFW (Suppress Oracle init conflicts)
 if command -v ufw >/dev/null 2>&1; then
-    ufw allow 22/tcp comment 'SSH' || true
-    ufw allow 80/tcp comment 'Nginx HTTP' || true
-    ufw allow 443/tcp comment 'Nginx HTTPS' || true
-    ufw allow 8443/tcp comment 'Nginx Alt HTTPS' || true
+    ufw allow 22/tcp 2>/dev/null || true
+    ufw allow 80/tcp 2>/dev/null || true
+    ufw allow 443/tcp 2>/dev/null || true
+    ufw allow 8443/tcp 2>/dev/null || true
 fi
 
 # ------------------------------------------------------------------------------
@@ -1469,12 +1455,13 @@ systemctl restart dufs 2>/dev/null || true
 systemctl restart aria2 2>/dev/null || true
 systemctl restart kasmvnc
 sleep 3
-systemctl restart nginx
 
+# Start and enable unmasked Nginx
+systemctl restart nginx
 systemctl enable pulseaudio audio-streamer kasmvnc nginx dufs aria2 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 23. System Verification and Diagnostics
+# 23. System Health Verification
 # ------------------------------------------------------------------------------
 echo "===================================================================="
 echo "                   System Health Verification                       "
@@ -1500,7 +1487,7 @@ check_port 6082 "PulseAudio Monitor"
 check_port 8088 "Dufs Files"
 check_port 6800 "Aria2 RPC"
 
-# Test Aria2 RPC connectivity live
+# Test Aria2 RPC connectivity
 echo -n "  Testing Aria2 JSON-RPC response: "
 ARIA2_VERSION=$(curl -s -X POST http://127.0.0.1:6800/jsonrpc -d '{"jsonrpc":"2.0","id":"check","method":"aria2.getVersion"}' 2>/dev/null | jq -r '.result.version' 2>/dev/null || echo "")
 if [ -n "$ARIA2_VERSION" ]; then
@@ -1518,7 +1505,7 @@ else
 fi
 
 echo "===================================================================="
-echo "  UpCloud Workstation Ready! Access Details:"
+echo "  Oracle Ampere Workstation Ready! Access Details:"
 echo "===================================================================="
 echo "  Access Portal    : https://${SERVER_IP}/"
 echo "  Direct Desktop   : https://${SERVER_IP}/desktop/?autoconnect=true"
